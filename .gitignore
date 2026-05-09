@@ -1,0 +1,11 @@
+# Data files (DO NOT COMMIT PERSONAL DATA)
+*.xml
+*.json
+*.csv
+
+# Python caches and environments
+__pycache__/
+*.pyc
+
+# OS generated files
+.DS_Store

@@ -15,7 +15,7 @@ st.set_page_config(page_title="Spotify x Strava Analyzer", layout="wide", page_i
 
 def _ensure_fer_deps():
     try:
-        import cv2, numpy
+        import cv2, numpy, tensorflow
         from fer.fer import FER
         return True
     except ImportError:
@@ -328,6 +328,31 @@ def compute_fatigue_from_emotions(emotions: dict) -> tuple:
     else:
         label = "Low Fatigue"
     return round(score, 1), label
+
+def get_fatigue_label(score: float) -> str:
+    if score >= 7:
+        return "High Fatigue"
+    if score >= 4:
+        return "Medium Fatigue"
+    return "Low Fatigue"
+
+@st.cache_data(show_spinner="Calculating image fatigue...")
+def analyze_image_fatigue(image_bytes: bytes) -> dict:
+    emotions = analyze_image_emotions(image_bytes)
+    if emotions:
+        score, label = compute_fatigue_from_emotions(emotions)
+        rate = round(score * 10, 1)
+    else:
+        score = None
+        rate = None
+        label = "No Face Detected" if _FER_AVAILABLE else "FER Unavailable"
+    return {
+        "score": score,
+        "rate": rate,
+        "label": label,
+        "source": "FER facial expression analysis",
+        "emotions": emotions,
+    }
 
 # -----------------------------------------------------------------------------
 # UI Pages
@@ -748,15 +773,28 @@ def combined_analysis_page():
                     
                     # 1. Prepare data for the combined constructs and visualization
                     photo_data = []
+                    image_fatigue_data = []
                     beast_mode_dict = {} # To quickly look up the score for the gallery
                     for w in workouts_with_imgs:
                         imgs = workout_images[w['Activity ID']]
                         fatigue_raw = []
-                        for img_bytes in imgs:
-                            emotions = analyze_image_emotions(img_bytes)
-                            f_score, _ = compute_fatigue_from_emotions(emotions)
-                            fatigue_raw.append(f_score * 10)  # scale 0-10 → 0-100
-                        avg_fatigue = sum(fatigue_raw) / len(fatigue_raw) if fatigue_raw else 50
+                        for img_index, img_bytes in enumerate(imgs, start=1):
+                            fatigue = analyze_image_fatigue(img_bytes)
+                            if fatigue["rate"] is not None:
+                                fatigue_raw.append(fatigue["rate"])
+                            image_fatigue_data.append({
+                                'Activity ID': w['Activity ID'],
+                                'Activity Name': w['Activity Name'],
+                                'Date': w['Date'],
+                                'Activity Type': w['Activity Type'],
+                                'Image': f"Image {img_index}",
+                                'Image Fatigue Rate': fatigue["rate"],
+                                'Fatigue Label': fatigue["label"],
+                                'Analysis Source': fatigue["source"],
+                                'Average Track BPM': w['Average Track BPM'],
+                                'Dominant Genre': w['Dominant Genre']
+                            })
+                        avg_fatigue = sum(fatigue_raw) / len(fatigue_raw) if fatigue_raw else None
                         
                         # Combine HR, Perceived Exertion, and AI Fatigue into a new construct
                         hr = w.get('Average Heart Rate', 0)
@@ -765,7 +803,8 @@ def combined_analysis_page():
                         pe_score = (pe / 10.0) * 100 if pe > 0 else 50
                         
                         # ⚡ "Beast Mode Index" calculation
-                        beast_mode_index = round((hr_score + pe_score + avg_fatigue) / 3, 1)
+                        fatigue_for_index = avg_fatigue if avg_fatigue is not None else 50
+                        beast_mode_index = round((hr_score + pe_score + fatigue_for_index) / 3, 1)
                         beast_mode_dict[w['Activity ID']] = beast_mode_index
                         
                         photo_data.append({
@@ -781,6 +820,63 @@ def combined_analysis_page():
                     
                     # 2. Render the Beast Mode Index vs BPM & Genre Chart
                     photo_df = pd.DataFrame(photo_data)
+                    image_fatigue_df = pd.DataFrame(image_fatigue_data)
+                    scored_photo_df = photo_df.dropna(subset=['AI Detected Fatigue'])
+                    scored_image_fatigue_df = image_fatigue_df.dropna(subset=['Image Fatigue Rate'])
+
+                    st.markdown("### Image Fatigue Rate")
+
+                    if not _FER_AVAILABLE:
+                        st.error("FER is not available in this environment, so image fatigue rates cannot be calculated.")
+                    elif scored_image_fatigue_df.empty:
+                        st.info("FER did not detect a face in the linked workout images, so no fatigue rate could be calculated.")
+                    else:
+                        avg_fatigue_chart = alt.Chart(scored_photo_df).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+                            x=alt.X('Activity Name:N', sort='-y', title=None, axis=alt.Axis(labelAngle=-35)),
+                            y=alt.Y('AI Detected Fatigue:Q', title='Average FER fatigue rate (%)', scale=alt.Scale(domain=[0, 100])),
+                            color=alt.Color(
+                                'Activity Type:N',
+                                legend=alt.Legend(title="Activity Type"),
+                                scale=alt.Scale(scheme="tableau10")
+                            ),
+                            tooltip=[
+                                'Activity Name',
+                                'Date',
+                                alt.Tooltip('AI Detected Fatigue:Q', title='Avg. FER Fatigue Rate', format='.1f'),
+                                'Activity Type',
+                                'Dominant Genre',
+                                'Average Track BPM'
+                            ]
+                        ).properties(
+                            height=320,
+                            title="Average FER Fatigue Rate per Workout"
+                        )
+
+                        image_points_chart = alt.Chart(scored_image_fatigue_df).mark_circle(size=90, opacity=0.85).encode(
+                            x=alt.X('Activity Name:N', sort='-y', title=None, axis=alt.Axis(labelAngle=-35)),
+                            y=alt.Y('Image Fatigue Rate:Q', title='FER fatigue rate (%)', scale=alt.Scale(domain=[0, 100])),
+                            color=alt.Color(
+                                'Fatigue Label:N',
+                                legend=alt.Legend(title="Fatigue"),
+                                scale=alt.Scale(
+                                    domain=['Low Fatigue', 'Medium Fatigue', 'High Fatigue'],
+                                    range=['#22C55E', '#F59E0B', '#EF4444']
+                                )
+                            ),
+                            tooltip=[
+                                'Activity Name',
+                                'Image',
+                                alt.Tooltip('Image Fatigue Rate:Q', title='FER Fatigue Rate', format='.1f'),
+                                'Fatigue Label',
+                                'Analysis Source'
+                            ]
+                        ).properties(
+                            height=320,
+                            title="FER Fatigue Rate of Each Workout Image"
+                        )
+
+                        st.altair_chart(avg_fatigue_chart, use_container_width=True)
+                        st.altair_chart(image_points_chart, use_container_width=True)
                     
                     st.markdown("### ⚡ The Beast Mode Index")
                     st.markdown("We combined your **Heart Rate**, **Perceived Exertion**, and **AI Detected Fatigue** into a single ultimate metric: the **Beast Mode Index (0-100)**! Let's see how your overall intensity relates to the music's tempo and genre.")
@@ -807,9 +903,10 @@ def combined_analysis_page():
                             with cols[col_idx % 3]:
                                 st.image(img_bytes, caption=f"{w['Activity Name']} ({w['Date']})", use_container_width=True)
 
-                                # Real FER emotion analysis (cached — instant on repeat views)
-                                emotions = analyze_image_emotions(img_bytes)
-                                fatigue_score, fatigue_label = compute_fatigue_from_emotions(emotions)
+                                fatigue = analyze_image_fatigue(img_bytes)
+                                emotions = fatigue["emotions"]
+                                fatigue_score = fatigue["score"]
+                                fatigue_label = fatigue["label"]
 
                                 if emotions:
                                     emotion_df = pd.DataFrame([
@@ -824,10 +921,13 @@ def combined_analysis_page():
                                     ).properties(height=170)
                                     st.altair_chart(emotion_chart, use_container_width=True)
                                 else:
-                                    st.caption("No face detected in this photo.")
+                                    st.caption(f"{fatigue_label}. FER needs a visible face to calculate fatigue.")
 
-                                fatigue_icon = "🔴" if fatigue_label == "High Fatigue" else ("🟡" if fatigue_label == "Medium Fatigue" else "🟢")
-                                st.caption(f"{fatigue_icon} **{fatigue_label}** ({fatigue_score}/10) | ⚡ Beast Mode: {beast_mode_dict[w['Activity ID']]}%")
+                                if fatigue_score is not None:
+                                    fatigue_icon = "🔴" if fatigue_label == "High Fatigue" else ("🟡" if fatigue_label == "Medium Fatigue" else "🟢")
+                                    st.caption(f"{fatigue_icon} **{fatigue_label}** ({fatigue_score}/10) | ⚡ Beast Mode: {beast_mode_dict[w['Activity ID']]}%")
+                                else:
+                                    st.caption(f"⚪ **{fatigue_label}** | ⚡ Beast Mode: {beast_mode_dict[w['Activity ID']]}%")
                                 st.info(f"🎵 {w['Songs Played']} songs | **{w['Average Track BPM']} BPM**")
 
                                 pe_label = f" • 🔥 Effort: {w['Perceived Exertion']}/10" if w['Perceived Exertion'] > 0 else ""

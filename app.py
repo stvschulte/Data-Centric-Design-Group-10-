@@ -15,23 +15,11 @@ st.set_page_config(page_title="Spotify x Strava Analyzer", layout="wide", page_i
 
 def _ensure_fer_deps():
     try:
-        import cv2, numpy, tensorflow
+        import cv2, numpy
         from fer.fer import FER
         return True
     except ImportError:
-        import subprocess, sys
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install",
-             "fer>=22.5.0", "tensorflow-cpu>=2.14.0",
-             "opencv-python-headless>=4.8.0", "Pillow>=10.0.0", "-q"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        try:
-            import cv2, numpy, tensorflow
-            from fer.fer import FER
-            return True
-        except ImportError:
-            return False
+        return False
 
 _FER_AVAILABLE = _ensure_fer_deps()
 if _FER_AVAILABLE:
@@ -298,7 +286,7 @@ def get_mock_genre(artist_name: str) -> str:
 @st.cache_resource
 def _get_fer_detector():
     from fer.fer import FER
-    return FER(mtcnn=True)
+    return FER(mtcnn=False)
 
 def get_image_timestamp(image_bytes: bytes):
     """Read EXIF DateTimeOriginal from image bytes; returns datetime or None."""

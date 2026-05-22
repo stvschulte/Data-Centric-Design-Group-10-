@@ -26,6 +26,18 @@ if _FER_AVAILABLE:
     import cv2
     import numpy as np
 
+def normalize_activity_id(activity_id) -> str:
+    """Normalize Strava activity IDs from CSV/media exports for reliable matching."""
+    if pd.isna(activity_id):
+        return ""
+    if isinstance(activity_id, float) and activity_id.is_integer():
+        return str(int(activity_id))
+    return str(activity_id).strip()
+
+def get_images_for_activity(workout_images: dict, activity_id):
+    key = normalize_activity_id(activity_id)
+    return workout_images.get(key, workout_images.get(activity_id, []))
+
 def init_session_state():
     if 'step' not in st.session_state:
         st.session_state.step = 1
@@ -216,6 +228,7 @@ def process_strava_files(uploaded_files):
 
     activity_id_col = next((col for col in df.columns if col.lower() == 'activity id'), None)
     df['Activity ID'] = df[activity_id_col] if activity_id_col else df.index
+    df['Activity ID'] = df['Activity ID'].apply(normalize_activity_id)
 
     workout_images = {}
     if image_files:
@@ -230,7 +243,7 @@ def process_strava_files(uploaded_files):
 
                 if m_act_col and m_file_col:
                     for _, row in media_df.iterrows():
-                        act_id, filepath = row[m_act_col], str(row[m_file_col])
+                        act_id, filepath = normalize_activity_id(row[m_act_col]), str(row[m_file_col])
                         filename = filepath.replace('\\', '/').split('/')[-1]
                         if filename in img_dict:
                             workout_images.setdefault(act_id, []).append(img_dict[filename].getvalue())
@@ -248,7 +261,7 @@ def process_strava_files(uploaded_files):
                 continue
             for _, row in df.iterrows():
                 if row['Activity Date'] <= photo_time <= row['End Date']:
-                    workout_images.setdefault(row['Activity ID'], []).append(img_bytes)
+                    workout_images.setdefault(normalize_activity_id(row['Activity ID']), []).append(img_bytes)
                     matched_bytes.add(img_bytes)
                     break
 
@@ -304,15 +317,18 @@ def analyze_image_emotions(image_bytes: bytes) -> dict:
     """Run FER on image bytes; returns emotion score dict (empty if no face / FER unavailable)."""
     if not _FER_AVAILABLE:
         return {}
-    detector = _get_fer_detector()
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if image is None:
+    try:
+        detector = _get_fer_detector()
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if image is None:
+            return {}
+        analysis = detector.detect_emotions(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        if not analysis:
+            return {}
+        return analysis[0].get("emotions", {})
+    except Exception:
         return {}
-    analysis = detector.detect_emotions(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-    if not analysis:
-        return {}
-    return analysis[0].get("emotions", {})
 
 def compute_fatigue_from_emotions(emotions: dict) -> tuple:
     """Return (fatigue_score 0-10, fatigue_label) from emotion dict."""
@@ -342,15 +358,17 @@ def analyze_image_fatigue(image_bytes: bytes) -> dict:
     if emotions:
         score, label = compute_fatigue_from_emotions(emotions)
         rate = round(score * 10, 1)
+        source = "FER facial expression analysis"
     else:
         score = None
         rate = None
         label = "No Face Detected" if _FER_AVAILABLE else "FER Unavailable"
+        source = "FER facial expression analysis (no face detected)" if _FER_AVAILABLE else "FER not installed in this environment"
     return {
         "score": score,
         "rate": rate,
         "label": label,
-        "source": "FER facial expression analysis",
+        "source": source,
         "emotions": emotions,
     }
 
@@ -767,21 +785,35 @@ def combined_analysis_page():
                 st.subheader("📸 AI Photo Analysis & Music Vibe")
                 st.markdown("We've analyzed your post-workout photos for fatigue and compared it to the music you were listening to!")
                 
-                workouts_with_imgs = [w for w in combined_data if w['Activity ID'] in workout_images]
+                workouts_with_imgs = []
+                for workout in filtered_df.to_dict('records'):
+                    imgs = get_images_for_activity(workout_images, workout['Activity ID'])
+                    if imgs:
+                        workouts_with_imgs.append((workout, imgs))
                 
                 if workouts_with_imgs:
                     
                     # 1. Prepare data for the combined constructs and visualization
                     photo_data = []
                     image_fatigue_data = []
+                    emotion_rows = []
                     beast_mode_dict = {} # To quickly look up the score for the gallery
-                    for w in workouts_with_imgs:
-                        imgs = workout_images[w['Activity ID']]
+                    for w, imgs in workouts_with_imgs:
                         fatigue_raw = []
                         for img_index, img_bytes in enumerate(imgs, start=1):
                             fatigue = analyze_image_fatigue(img_bytes)
                             if fatigue["rate"] is not None:
                                 fatigue_raw.append(fatigue["rate"])
+                            for emotion, score in fatigue["emotions"].items():
+                                emotion_rows.append({
+                                    'Activity ID': w['Activity ID'],
+                                    'Activity Name': w['Activity Name'],
+                                    'Date': w['Date'],
+                                    'Activity Type': w['Activity Type'],
+                                    'Image': f"Image {img_index}",
+                                    'Emotion': emotion.capitalize(),
+                                    'Score': score,
+                                })
                             image_fatigue_data.append({
                                 'Activity ID': w['Activity ID'],
                                 'Activity Name': w['Activity Name'],
@@ -791,6 +823,9 @@ def combined_analysis_page():
                                 'Image Fatigue Rate': fatigue["rate"],
                                 'Fatigue Label': fatigue["label"],
                                 'Analysis Source': fatigue["source"],
+                                'Average Heart Rate': w['Average Heart Rate'],
+                                'Perceived Exertion': w['Perceived Exertion'],
+                                'Perceived Relative Effort': w['Perceived Relative Effort'],
                                 'Average Track BPM': w['Average Track BPM'],
                                 'Dominant Genre': w['Dominant Genre']
                             })
@@ -808,11 +843,15 @@ def combined_analysis_page():
                         beast_mode_dict[w['Activity ID']] = beast_mode_index
                         
                         photo_data.append({
+                            'Activity ID': w['Activity ID'],
                             'Activity Name': w['Activity Name'],
                             'Date': w['Date'],
                             'Activity Type': w['Activity Type'],
                             'AI Detected Fatigue': avg_fatigue,
                             'Beast Mode Index': beast_mode_index,
+                            'Average Heart Rate': w['Average Heart Rate'],
+                            'Perceived Exertion': w['Perceived Exertion'],
+                            'Perceived Relative Effort': w['Perceived Relative Effort'],
                             'Average Track BPM': w['Average Track BPM'],
                             'Average Danceability': w['Average Danceability'],
                             'Dominant Genre': w['Dominant Genre']
@@ -821,16 +860,46 @@ def combined_analysis_page():
                     # 2. Render the Beast Mode Index vs BPM & Genre Chart
                     photo_df = pd.DataFrame(photo_data)
                     image_fatigue_df = pd.DataFrame(image_fatigue_data)
+                    emotion_df = pd.DataFrame(emotion_rows)
                     scored_photo_df = photo_df.dropna(subset=['AI Detected Fatigue'])
                     scored_image_fatigue_df = image_fatigue_df.dropna(subset=['Image Fatigue Rate'])
 
-                    st.markdown("### Image Fatigue Rate")
+                    st.markdown("### Photo Analysis Dashboard")
+
+                    total_images = len(image_fatigue_df)
+                    scored_images = len(scored_image_fatigue_df)
+                    avg_image_fatigue = scored_image_fatigue_df['Image Fatigue Rate'].mean() if scored_images else None
+                    high_fatigue_images = len(scored_image_fatigue_df[scored_image_fatigue_df['Fatigue Label'] == 'High Fatigue']) if scored_images else 0
+
+                    metric_cols = st.columns(4)
+                    metric_cols[0].metric("Linked Workouts", len(photo_df))
+                    metric_cols[1].metric("Linked Photos", total_images)
+                    metric_cols[2].metric("Photos Scored", scored_images)
+                    metric_cols[3].metric("Avg Image Fatigue", f"{avg_image_fatigue:.1f}%" if avg_image_fatigue is not None else "N/A")
+
+                    label_counts = image_fatigue_df.groupby('Fatigue Label').size().reset_index(name='Images')
+                    label_chart = alt.Chart(label_counts).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+                        x=alt.X('Fatigue Label:N', title=None, sort=['Low Fatigue', 'Medium Fatigue', 'High Fatigue', 'No Face Detected', 'FER Unavailable']),
+                        y=alt.Y('Images:Q', title='Images'),
+                        color=alt.Color(
+                            'Fatigue Label:N',
+                            legend=None,
+                            scale=alt.Scale(
+                                domain=['Low Fatigue', 'Medium Fatigue', 'High Fatigue', 'No Face Detected', 'FER Unavailable'],
+                                range=['#22C55E', '#F59E0B', '#EF4444', '#94A3B8', '#64748B']
+                            )
+                        ),
+                        tooltip=['Fatigue Label', 'Images']
+                    ).properties(height=260, title="Image Analysis Status")
+                    st.altair_chart(label_chart, use_container_width=True)
 
                     if not _FER_AVAILABLE:
                         st.error("FER is not available in this environment, so image fatigue rates cannot be calculated.")
                     elif scored_image_fatigue_df.empty:
                         st.info("FER did not detect a face in the linked workout images, so no fatigue rate could be calculated.")
                     else:
+                        st.caption(f"{high_fatigue_images} of {scored_images} scored photos were classified as high fatigue.")
+
                         avg_fatigue_chart = alt.Chart(scored_photo_df).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
                             x=alt.X('Activity Name:N', sort='-y', title=None, axis=alt.Axis(labelAngle=-35)),
                             y=alt.Y('AI Detected Fatigue:Q', title='Average FER fatigue rate (%)', scale=alt.Scale(domain=[0, 100])),
@@ -877,6 +946,40 @@ def combined_analysis_page():
 
                         st.altair_chart(avg_fatigue_chart, use_container_width=True)
                         st.altair_chart(image_points_chart, use_container_width=True)
+
+                        if scored_image_fatigue_df['Average Heart Rate'].max() > 0:
+                            fatigue_hr_chart = alt.Chart(scored_image_fatigue_df).mark_circle(size=95, opacity=0.85).encode(
+                                x=alt.X('Average Heart Rate:Q', title='Average Heart Rate (bpm)', scale=alt.Scale(zero=False)),
+                                y=alt.Y('Image Fatigue Rate:Q', title='FER fatigue rate (%)', scale=alt.Scale(domain=[0, 100])),
+                                color=alt.Color('Activity Type:N', legend=alt.Legend(title="Activity Type")),
+                                size=alt.Size('Average Track BPM:Q', title='Avg Music BPM', scale=alt.Scale(range=[80, 450])),
+                                tooltip=[
+                                    'Activity Name',
+                                    'Date',
+                                    alt.Tooltip('Average Heart Rate:Q', title='Avg HR', format='.0f'),
+                                    alt.Tooltip('Image Fatigue Rate:Q', title='FER Fatigue Rate', format='.1f'),
+                                    'Fatigue Label',
+                                    'Average Track BPM',
+                                    'Dominant Genre'
+                                ]
+                            ).properties(
+                                height=340,
+                                title="Image Fatigue vs. Workout Intensity"
+                            ).interactive()
+                            st.altair_chart(fatigue_hr_chart, use_container_width=True)
+
+                        if not emotion_df.empty:
+                            emotion_summary = emotion_df.groupby('Emotion', as_index=False)['Score'].mean()
+                            emotion_summary_chart = alt.Chart(emotion_summary).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+                                x=alt.X('Score:Q', title='Average FER emotion score', scale=alt.Scale(domain=[0, 1]), axis=alt.Axis(format='%')),
+                                y=alt.Y('Emotion:N', sort='-x', title=None),
+                                color=alt.Color('Emotion:N', legend=None, scale=alt.Scale(scheme="tableau10")),
+                                tooltip=['Emotion', alt.Tooltip('Score:Q', format='.1%')]
+                            ).properties(
+                                height=260,
+                                title="Average Detected Emotion Across Workout Photos"
+                            )
+                            st.altair_chart(emotion_summary_chart, use_container_width=True)
                     
                     st.markdown("### ⚡ The Beast Mode Index")
                     st.markdown("We combined your **Heart Rate**, **Perceived Exertion**, and **AI Detected Fatigue** into a single ultimate metric: the **Beast Mode Index (0-100)**! Let's see how your overall intensity relates to the music's tempo and genre.")
@@ -897,8 +1000,7 @@ def combined_analysis_page():
                     st.markdown("#### Your Workout Gallery")
                     cols = st.columns(3)
                     col_idx = 0
-                    for w in workouts_with_imgs:
-                        imgs = workout_images[w['Activity ID']]
+                    for w, imgs in workouts_with_imgs:
                         for img_bytes in imgs:
                             with cols[col_idx % 3]:
                                 st.image(img_bytes, caption=f"{w['Activity Name']} ({w['Date']})", use_container_width=True)

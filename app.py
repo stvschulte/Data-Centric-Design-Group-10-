@@ -221,18 +221,22 @@ def process_spotify_files(uploaded_files) -> pd.DataFrame:
 def process_strava_files(uploaded_files):
     """Parses Strava activities CSV and associated media files."""
     if not uploaded_files:
-        return pd.DataFrame(), {}
+        return pd.DataFrame(), {}, []
         
     activities_files = [f for f in uploaded_files if f.name.lower().endswith('.csv') and 'media' not in f.name.lower()]
     media_files = [f for f in uploaded_files if f.name.lower().endswith('.csv') and 'media' in f.name.lower()]
     image_files = [f for f in uploaded_files if f.name.lower().endswith(('.jpg', '.jpeg', '.png'))]
+    uploaded_images = [
+        {"name": img.name, "bytes": img.getvalue()}
+        for img in image_files
+    ]
     
     if not activities_files:
         activities_files = [f for f in uploaded_files if f.name.lower().endswith('.csv')]
         
     if not activities_files:
         st.error("The uploaded files must contain at least the 'activities.csv' file.")
-        return pd.DataFrame(), {}
+        return pd.DataFrame(), {}, uploaded_images
         
     df = pd.concat([read_uploaded_csv(f) for f in activities_files], ignore_index=True)
     df = rename_first_matching_column(df, 'Activity Date', ['Activity date', 'Start Date', 'Start Time', 'Date'])
@@ -241,13 +245,13 @@ def process_strava_files(uploaded_files):
     if 'Activity Date' not in df.columns or 'Elapsed Time' not in df.columns:
         st.error("The uploaded CSV must contain at least 'Activity Date' and 'Elapsed Time' columns.")
         st.caption(f"Columns detected: {', '.join(map(str, df.columns.tolist()))}")
-        return pd.DataFrame(), {}
+        return pd.DataFrame(), {}, uploaded_images
 
     df['Activity Date'] = pd.to_datetime(df['Activity Date'], errors='coerce')
     df['Elapsed Time'] = parse_elapsed_time_seconds(df['Elapsed Time'])
     if df['Activity Date'].isna().all() or df['Elapsed Time'].isna().all():
         st.error("The uploaded CSV has the right columns, but the activity dates or elapsed times could not be parsed.")
-        return pd.DataFrame(), {}
+        return pd.DataFrame(), {}, uploaded_images
     df = df.dropna(subset=['Activity Date', 'Elapsed Time'])
     if df['Activity Date'].dt.tz is not None:
         df['Activity Date'] = df['Activity Date'].dt.tz_convert(None)
@@ -268,7 +272,7 @@ def process_strava_files(uploaded_files):
 
     workout_images = {}
     if image_files:
-        img_dict = {img.name: img for img in image_files}
+        img_dict = {img["name"]: img["bytes"] for img in uploaded_images}
 
         # 1. Match via media.csv explicit mapping (most reliable when available)
         if media_files:
@@ -282,14 +286,14 @@ def process_strava_files(uploaded_files):
                         act_id, filepath = normalize_activity_id(row[m_act_col]), str(row[m_file_col])
                         filename = filepath.replace('\\', '/').split('/')[-1]
                         if filename in img_dict:
-                            workout_images.setdefault(act_id, []).append(img_dict[filename].getvalue())
+                            workout_images.setdefault(act_id, []).append(img_dict[filename])
             except Exception as e:
                 st.warning(f"Could not parse media files: {e}")
 
         # 2. Match remaining photos by EXIF timestamp — check if photo was taken during a workout
         matched_bytes = {b for imgs in workout_images.values() for b in imgs}
-        for img_file in image_files:
-            img_bytes = img_file.getvalue()
+        for img_file in uploaded_images:
+            img_bytes = img_file["bytes"]
             if img_bytes in matched_bytes:
                 continue
             photo_time = get_image_timestamp(img_bytes)
@@ -302,7 +306,7 @@ def process_strava_files(uploaded_files):
                     break
 
     cols_to_keep = ['Activity ID', 'Activity Name', 'Activity Type', 'Activity Date', 'End Date', 'Elapsed Time', 'Average Heart Rate', 'Perceived Exertion', 'Perceived Relative Effort']
-    return df[cols_to_keep], workout_images
+    return df[cols_to_keep], workout_images, uploaded_images
 
 def get_mock_bpm(track_name: str) -> int:
     if not isinstance(track_name, str):
@@ -515,12 +519,14 @@ def strava_page():
     
     if strava_files:
         with st.spinner("Processing Strava Data and matching Images..."):
-            df_strava, workout_images = process_strava_files(strava_files)
+            df_strava, workout_images, uploaded_images = process_strava_files(strava_files)
         
         if not df_strava.empty and 'Activity Date' in df_strava.columns:
             st.success("Strava data successfully processed!")
             
             st.metric(label="Total Logged Workouts", value=len(df_strava))
+            if uploaded_images:
+                st.metric(label="Photos Uploaded", value=len(uploaded_images))
             if workout_images:
                 st.metric(label="Photos Linked", value=sum(len(imgs) for imgs in workout_images.values()))
             
@@ -530,6 +536,7 @@ def strava_page():
             
             st.session_state.workout_data = df_strava
             st.session_state.workout_images = workout_images
+            st.session_state.uploaded_images = uploaded_images
             st.button("Continue to Combined Analysis ➡️", on_click=next_step, type="primary")
 
 def combined_analysis_page():
@@ -816,10 +823,107 @@ def combined_analysis_page():
             
             # --- START: Workout Gallery ---
             workout_images = st.session_state.get('workout_images', {})
-            if workout_images:
+            uploaded_images = st.session_state.get('uploaded_images', [])
+            if not uploaded_images and workout_images:
+                uploaded_images = [
+                    {"name": f"Linked image {idx}", "bytes": img_bytes}
+                    for idx, img_bytes in enumerate(
+                        [img for imgs in workout_images.values() for img in imgs],
+                        start=1
+                    )
+                ]
+
+            if uploaded_images or workout_images:
                 st.divider()
-                st.subheader("📸 AI Photo Analysis & Music Vibe")
-                st.markdown("We've analyzed your post-workout photos for fatigue and compared it to the music you were listening to!")
+                st.subheader("📸 FER Photo Fatigue Analysis")
+                st.markdown("Uploaded workout photos are passed through FER facial-expression analysis and converted into a fatigue score when a face is detected.")
+
+                if uploaded_images:
+                    fer_check_rows = []
+                    fer_emotion_rows = []
+                    for img_index, image_info in enumerate(uploaded_images, start=1):
+                        fatigue = analyze_image_fatigue(image_info["bytes"])
+                        dominant_emotion = None
+                        dominant_score = None
+                        if fatigue["emotions"]:
+                            dominant_emotion, dominant_score = max(fatigue["emotions"].items(), key=lambda item: item[1])
+                            for emotion, score in fatigue["emotions"].items():
+                                fer_emotion_rows.append({
+                                    "Image": image_info["name"],
+                                    "Emotion": emotion.capitalize(),
+                                    "Score": score,
+                                })
+                        fer_check_rows.append({
+                            "Image": image_info["name"],
+                            "FER Fatigue Rate": fatigue["rate"],
+                            "Fatigue Label": fatigue["label"],
+                            "Dominant Emotion": dominant_emotion.capitalize() if dominant_emotion else "N/A",
+                            "Dominant Emotion Score": dominant_score,
+                            "Analysis Source": fatigue["source"],
+                        })
+
+                    fer_check_df = pd.DataFrame(fer_check_rows)
+                    scored_fer_check_df = fer_check_df.dropna(subset=["FER Fatigue Rate"])
+                    fer_metric_cols = st.columns(4)
+                    fer_metric_cols[0].metric("Images Sent to FER", len(fer_check_df))
+                    fer_metric_cols[1].metric("Faces Scored", len(scored_fer_check_df))
+                    fer_metric_cols[2].metric("FER Available", "Yes" if _FER_AVAILABLE else "No")
+                    fer_metric_cols[3].metric(
+                        "Avg FER Fatigue",
+                        f"{scored_fer_check_df['FER Fatigue Rate'].mean():.1f}%" if not scored_fer_check_df.empty else "N/A",
+                    )
+
+                    status_counts = fer_check_df.groupby("Fatigue Label").size().reset_index(name="Images")
+                    status_chart = alt.Chart(status_counts).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+                        x=alt.X("Fatigue Label:N", title=None, sort=["Low Fatigue", "Medium Fatigue", "High Fatigue", "No Face Detected", "FER Unavailable"]),
+                        y=alt.Y("Images:Q", title="Images"),
+                        color=alt.Color(
+                            "Fatigue Label:N",
+                            legend=None,
+                            scale=alt.Scale(
+                                domain=["Low Fatigue", "Medium Fatigue", "High Fatigue", "No Face Detected", "FER Unavailable"],
+                                range=["#22C55E", "#F59E0B", "#EF4444", "#94A3B8", "#64748B"],
+                            ),
+                        ),
+                        tooltip=["Fatigue Label", "Images"],
+                    ).properties(height=260, title="FER Analysis Result by Uploaded Image")
+                    st.altair_chart(status_chart, use_container_width=True)
+
+                    if scored_fer_check_df.empty:
+                        st.info("FER has not produced fatigue scores for these images. Check that FER is installed and that the uploaded photos contain visible faces.")
+                    else:
+                        fer_fatigue_chart = alt.Chart(scored_fer_check_df).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+                            x=alt.X("Image:N", title=None, sort="-y", axis=alt.Axis(labelAngle=-35)),
+                            y=alt.Y("FER Fatigue Rate:Q", title="FER fatigue rate (%)", scale=alt.Scale(domain=[0, 100])),
+                            color=alt.Color(
+                                "Fatigue Label:N",
+                                legend=alt.Legend(title="Fatigue"),
+                                scale=alt.Scale(
+                                    domain=["Low Fatigue", "Medium Fatigue", "High Fatigue"],
+                                    range=["#22C55E", "#F59E0B", "#EF4444"],
+                                ),
+                            ),
+                            tooltip=[
+                                "Image",
+                                alt.Tooltip("FER Fatigue Rate:Q", title="FER Fatigue Rate", format=".1f"),
+                                "Fatigue Label",
+                                "Dominant Emotion",
+                                alt.Tooltip("Dominant Emotion Score:Q", title="Dominant Emotion Score", format=".1%"),
+                                "Analysis Source",
+                            ],
+                        ).properties(height=320, title="FER Fatigue Score per Uploaded Image")
+                        st.altair_chart(fer_fatigue_chart, use_container_width=True)
+
+                    if fer_emotion_rows:
+                        fer_emotion_df = pd.DataFrame(fer_emotion_rows)
+                        fer_emotion_summary = fer_emotion_df.groupby("Emotion", as_index=False)["Score"].mean()
+                        fer_emotion_chart = alt.Chart(fer_emotion_summary).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+                            x=alt.X("Score:Q", title="Average FER emotion score", scale=alt.Scale(domain=[0, 1]), axis=alt.Axis(format="%")),
+                            y=alt.Y("Emotion:N", title=None, sort="-x"),
+                            color=alt.Color("Emotion:N", legend=None, scale=alt.Scale(scheme="tableau10")),
+                            tooltip=["Emotion", alt.Tooltip("Score:Q", format=".1%")],
+                        ).properties(height=260, title="Average FER Emotion Scores")
+                        st.altair_chart(fer_emotion_chart, use_container_width=True)
                 
                 workouts_with_imgs = []
                 for workout in filtered_df.to_dict('records'):

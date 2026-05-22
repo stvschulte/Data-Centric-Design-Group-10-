@@ -8,6 +8,11 @@ import io
 from datetime import datetime
 from PIL import Image as PILImage
 
+# -----------------------------------------------------------------------------
+# Configuration & State Management
+# -----------------------------------------------------------------------------
+st.set_page_config(page_title="Spotify x Strava Analyzer", layout="wide", page_icon="⚡")
+
 def _ensure_fer_deps():
     try:
         import cv2, numpy, tensorflow
@@ -18,7 +23,7 @@ def _ensure_fer_deps():
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install",
              "fer>=22.5.0", "tensorflow-cpu>=2.14.0",
-             "opencv-python>=4.8.0", "Pillow>=10.0.0", "-q"],
+             "opencv-python-headless>=4.8.0", "Pillow>=10.0.0", "-q"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
         try:
@@ -32,11 +37,6 @@ _FER_AVAILABLE = _ensure_fer_deps()
 if _FER_AVAILABLE:
     import cv2
     import numpy as np
-
-# -----------------------------------------------------------------------------
-# Configuration & State Management
-# -----------------------------------------------------------------------------
-st.set_page_config(page_title="Spotify x Strava Analyzer", layout="wide", page_icon="⚡")
 
 def init_session_state():
     if 'step' not in st.session_state:

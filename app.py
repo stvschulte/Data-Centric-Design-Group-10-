@@ -38,6 +38,34 @@ def get_images_for_activity(workout_images: dict, activity_id):
     key = normalize_activity_id(activity_id)
     return workout_images.get(key, workout_images.get(activity_id, []))
 
+def normalize_column_name(column_name) -> str:
+    return " ".join(str(column_name).replace("\ufeff", "").strip().split())
+
+def column_key(column_name) -> str:
+    return normalize_column_name(column_name).lower()
+
+def read_uploaded_csv(uploaded_file) -> pd.DataFrame:
+    raw = uploaded_file.getvalue()
+    try:
+        df = pd.read_csv(io.BytesIO(raw), sep=None, engine="python", encoding="utf-8-sig")
+    except Exception:
+        df = pd.read_csv(io.BytesIO(raw), encoding="utf-8-sig")
+    df.columns = [normalize_column_name(col) for col in df.columns]
+    return df
+
+def rename_first_matching_column(df: pd.DataFrame, canonical_name: str, aliases: list[str]) -> pd.DataFrame:
+    lookup = {column_key(col): col for col in df.columns}
+    for alias in [canonical_name] + aliases:
+        match = lookup.get(column_key(alias))
+        if match:
+            return df.rename(columns={match: canonical_name})
+    return df
+
+def parse_elapsed_time_seconds(values: pd.Series) -> pd.Series:
+    numeric_seconds = pd.to_numeric(values, errors='coerce')
+    duration_seconds = pd.to_timedelta(values.astype(str), errors='coerce').dt.total_seconds()
+    return numeric_seconds.fillna(duration_seconds)
+
 def init_session_state():
     if 'step' not in st.session_state:
         st.session_state.step = 1
@@ -206,13 +234,21 @@ def process_strava_files(uploaded_files):
         st.error("The uploaded files must contain at least the 'activities.csv' file.")
         return pd.DataFrame(), {}
         
-    df = pd.concat([pd.read_csv(f) for f in activities_files], ignore_index=True)
+    df = pd.concat([read_uploaded_csv(f) for f in activities_files], ignore_index=True)
+    df = rename_first_matching_column(df, 'Activity Date', ['Activity date', 'Start Date', 'Start Time', 'Date'])
+    df = rename_first_matching_column(df, 'Elapsed Time', ['Elapsed Time (s)', 'Elapsed Time (sec)', 'Elapsed Time Seconds', 'Duration', 'Duration (s)', 'Duration Seconds'])
 
     if 'Activity Date' not in df.columns or 'Elapsed Time' not in df.columns:
         st.error("The uploaded CSV must contain at least 'Activity Date' and 'Elapsed Time' columns.")
+        st.caption(f"Columns detected: {', '.join(map(str, df.columns.tolist()))}")
         return pd.DataFrame(), {}
 
-    df['Activity Date'] = pd.to_datetime(df['Activity Date'])
+    df['Activity Date'] = pd.to_datetime(df['Activity Date'], errors='coerce')
+    df['Elapsed Time'] = parse_elapsed_time_seconds(df['Elapsed Time'])
+    if df['Activity Date'].isna().all() or df['Elapsed Time'].isna().all():
+        st.error("The uploaded CSV has the right columns, but the activity dates or elapsed times could not be parsed.")
+        return pd.DataFrame(), {}
+    df = df.dropna(subset=['Activity Date', 'Elapsed Time'])
     if df['Activity Date'].dt.tz is not None:
         df['Activity Date'] = df['Activity Date'].dt.tz_convert(None)
     
@@ -237,7 +273,7 @@ def process_strava_files(uploaded_files):
         # 1. Match via media.csv explicit mapping (most reliable when available)
         if media_files:
             try:
-                media_df = pd.read_csv(media_files[0])
+                media_df = read_uploaded_csv(media_files[0])
                 m_act_col = next((col for col in media_df.columns if 'activity' in col.lower()), None)
                 m_file_col = next((col for col in media_df.columns if 'file' in col.lower() or 'path' in col.lower() or 'name' in col.lower()), None)
 

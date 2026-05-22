@@ -38,9 +38,13 @@ streamlit run app.py
 
 ## Streamlit Community Cloud
 
-Set the app's Python version to **3.12** in Streamlit Community Cloud app
-settings before redeploying. Community Cloud does not use `runtime.txt` for
-Python version selection.
+The deployed requirements are kept compatible with Streamlit Community Cloud's
+current Python runtime. Community Cloud does not use `runtime.txt` for Python
+version selection.
+
+The optional `requirements-ml.txt` file is intended for local installs only and
+may require an older Python version because TensorFlow/FER support lags behind
+new Python releases.
 
 Or use the provided script (Linux/macOS):
 

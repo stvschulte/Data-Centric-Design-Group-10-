@@ -1,11 +1,22 @@
-# Data files (DO NOT COMMIT PERSONAL DATA)
-*.xml
-*.json
-*.csv
+# Privacy: don't commit participant data
+data/*.csv
+data/*.json
+!data/sample_*.csv
 
-# Python caches and environments
+# Python
 __pycache__/
 *.pyc
+*.pyo
+.venv/
+venv/
 
-# OS generated files
+# IDE
+.vscode/
+.idea/
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml

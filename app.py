@@ -4,6 +4,17 @@ import json
 import altair as alt
 import hashlib
 import xml.etree.ElementTree as ET
+import io
+from datetime import datetime
+from PIL import Image as PILImage
+
+try:
+    import cv2
+    import numpy as np
+    from fer.fer import FER as _FER
+    _FER_AVAILABLE = True
+except ImportError:
+    _FER_AVAILABLE = False
 
 # -----------------------------------------------------------------------------
 # Configuration & State Management
@@ -156,7 +167,7 @@ def process_spotify_files(uploaded_files) -> pd.DataFrame:
         df['endTime'] = pd.to_datetime(df['endTime'])
     
     if df['endTime'].dt.tz is not None:
-        df['endTime'] = df['endTime'].dt.tz_localize(None)
+        df['endTime'] = df['endTime'].dt.tz_convert(None)
     
     df = df.dropna(subset=['trackName'])
     return df
@@ -186,7 +197,7 @@ def process_strava_files(uploaded_files):
 
     df['Activity Date'] = pd.to_datetime(df['Activity Date'])
     if df['Activity Date'].dt.tz is not None:
-        df['Activity Date'] = df['Activity Date'].dt.tz_localize(None)
+        df['Activity Date'] = df['Activity Date'].dt.tz_convert(None)
     
     df['End Date'] = df['Activity Date'] + pd.to_timedelta(df['Elapsed Time'], unit='s')
 
@@ -204,14 +215,14 @@ def process_strava_files(uploaded_files):
     workout_images = {}
     if image_files:
         img_dict = {img.name: img for img in image_files}
-        
-        # 1. Probeer te koppelen via media.csv (indien aanwezig)
+
+        # 1. Match via media.csv explicit mapping (most reliable when available)
         if media_files:
             try:
                 media_df = pd.read_csv(media_files[0])
                 m_act_col = next((col for col in media_df.columns if 'activity' in col.lower()), None)
                 m_file_col = next((col for col in media_df.columns if 'file' in col.lower() or 'path' in col.lower() or 'name' in col.lower()), None)
-                
+
                 if m_act_col and m_file_col:
                     for _, row in media_df.iterrows():
                         act_id, filepath = row[m_act_col], str(row[m_file_col])
@@ -220,19 +231,21 @@ def process_strava_files(uploaded_files):
                             workout_images.setdefault(act_id, []).append(img_dict[filename].getvalue())
             except Exception as e:
                 st.warning(f"Could not parse media files: {e}")
-                
-        # 2. Zoek rechtstreeks in activities.csv naar de afbeeldingsnaam (als de naam hier beschreven staat)
-        for col in df.columns:
-            if df[col].dtype == object:
-                for _, row in df.iterrows():
-                    val = str(row[col])
-                    if val != 'nan' and val != 'None':
-                        act_id = row['Activity ID']
-                        for img_name, img_file in img_dict.items():
-                            if img_name in val:
-                                img_bytes = img_file.getvalue()
-                                if act_id not in workout_images or img_bytes not in workout_images.get(act_id, []):
-                                    workout_images.setdefault(act_id, []).append(img_bytes)
+
+        # 2. Match remaining photos by EXIF timestamp — check if photo was taken during a workout
+        matched_bytes = {b for imgs in workout_images.values() for b in imgs}
+        for img_file in image_files:
+            img_bytes = img_file.getvalue()
+            if img_bytes in matched_bytes:
+                continue
+            photo_time = get_image_timestamp(img_bytes)
+            if photo_time is None:
+                continue
+            for _, row in df.iterrows():
+                if row['Activity Date'] <= photo_time <= row['End Date']:
+                    workout_images.setdefault(row['Activity ID'], []).append(img_bytes)
+                    matched_bytes.add(img_bytes)
+                    break
 
     cols_to_keep = ['Activity ID', 'Activity Name', 'Activity Type', 'Activity Date', 'End Date', 'Elapsed Time', 'Average Heart Rate', 'Perceived Exertion', 'Perceived Relative Effort']
     return df[cols_to_keep], workout_images
@@ -265,29 +278,51 @@ def get_mock_genre(artist_name: str) -> str:
     hash_val = int(hashlib.md5(artist_name.encode('utf-8')).hexdigest(), 16)
     return genres[hash_val % len(genres)]
 
-def analyze_image_fatigue(image_bytes: bytes) -> int:
-    """
-    Simuleert AI gezichtsherkenning en zweet-analyse voor vermoeidheid (0-100%).
-    """
-    if not image_bytes:
-        return 0
-        
-    # We hashen de VOLLEDIGE afbeelding voor unieke variatie (i.p.v. alleen de metadata-header)
-    full_hash = hashlib.md5(image_bytes).hexdigest()
-    hash_int = int(full_hash, 16)
-    
-    # Simuleer "Gezichtsherkenning": is het gezicht duidelijk in beeld?
-    face_present = (hash_int % 2 == 0)
-    
-    # Simuleer "Zweet/Roodheid": gebaseerd op complexiteit van de byte-data
-    sweat_factor = len(image_bytes) % 40
-    
-    if face_present:
-        # Gezicht gevonden: score valt hoger uit (tussen 30% en 100%)
-        return min(100, (hash_int % 50) + 30 + sweat_factor)
+@st.cache_resource
+def _get_fer_detector():
+    from fer.fer import FER
+    return FER(mtcnn=True)
+
+def get_image_timestamp(image_bytes: bytes):
+    """Read EXIF DateTimeOriginal from image bytes; returns datetime or None."""
+    try:
+        with PILImage.open(io.BytesIO(image_bytes)) as img:
+            exif = img._getexif()
+            if exif is not None and 36867 in exif:
+                return datetime.strptime(exif[36867], "%Y:%m:%d %H:%M:%S")
+    except Exception:
+        pass
+    return None
+
+@st.cache_data(show_spinner="Analyzing facial expressions...")
+def analyze_image_emotions(image_bytes: bytes) -> dict:
+    """Run FER on image bytes; returns emotion score dict (empty if no face / FER unavailable)."""
+    if not _FER_AVAILABLE:
+        return {}
+    detector = _get_fer_detector()
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if image is None:
+        return {}
+    analysis = detector.detect_emotions(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    if not analysis:
+        return {}
+    return analysis[0].get("emotions", {})
+
+def compute_fatigue_from_emotions(emotions: dict) -> tuple:
+    """Return (fatigue_score 0-10, fatigue_label) from emotion dict."""
+    if not emotions:
+        return 5.0, "Unknown"
+    raw = (emotions.get("neutral", 0) + emotions.get("sad", 0)) - \
+          (emotions.get("happy", 0) + emotions.get("surprise", 0))
+    score = max(0.0, min(10.0, (raw + 1) / 2 * 10))
+    if score >= 7:
+        label = "High Fatigue"
+    elif score >= 4:
+        label = "Medium Fatigue"
     else:
-        # Geen gezicht duidelijk in beeld (bijv. een foto van de omgeving): lagere score
-        return min(100, (hash_int % 40) + 10 + (sweat_factor // 2))
+        label = "Low Fatigue"
+    return round(score, 1), label
 
 # -----------------------------------------------------------------------------
 # UI Pages
@@ -711,9 +746,12 @@ def combined_analysis_page():
                     beast_mode_dict = {} # To quickly look up the score for the gallery
                     for w in workouts_with_imgs:
                         imgs = workout_images[w['Activity ID']]
-                        # Average the fatigue score if there are multiple images for one workout
-                        fatigue_scores = [analyze_image_fatigue(img_bytes) for img_bytes in imgs]
-                        avg_fatigue = sum(fatigue_scores) / len(fatigue_scores)
+                        fatigue_raw = []
+                        for img_bytes in imgs:
+                            emotions = analyze_image_emotions(img_bytes)
+                            f_score, _ = compute_fatigue_from_emotions(emotions)
+                            fatigue_raw.append(f_score * 10)  # scale 0-10 → 0-100
+                        avg_fatigue = sum(fatigue_raw) / len(fatigue_raw) if fatigue_raw else 50
                         
                         # Combine HR, Perceived Exertion, and AI Fatigue into a new construct
                         hr = w.get('Average Heart Rate', 0)
@@ -763,17 +801,34 @@ def combined_analysis_page():
                         for img_bytes in imgs:
                             with cols[col_idx % 3]:
                                 st.image(img_bytes, caption=f"{w['Activity Name']} ({w['Date']})", use_container_width=True)
-                                
-                                # AI Image Analysis for Fatigue
-                                fatigue_score = analyze_image_fatigue(img_bytes)
-                                st.progress(fatigue_score / 100.0, text=f"🤖 Detected Fatigue: {fatigue_score}%")
 
-                                # Link the music, BPM, and Beast Mode Index directly below the image
-                                st.info(f"🎵 {w['Songs Played']} songs | **{w['Average Track BPM']} BPM** | ⚡ **Beast Mode: {beast_mode_dict[w['Activity ID']]}%**")
-                                
+                                # Real FER emotion analysis (cached — instant on repeat views)
+                                emotions = analyze_image_emotions(img_bytes)
+                                fatigue_score, fatigue_label = compute_fatigue_from_emotions(emotions)
+
+                                if emotions:
+                                    emotion_df = pd.DataFrame([
+                                        {"Emotion": k.capitalize(), "Score": round(v, 3)}
+                                        for k, v in sorted(emotions.items(), key=lambda x: x[1], reverse=True)
+                                    ])
+                                    emotion_chart = alt.Chart(emotion_df).mark_bar().encode(
+                                        x=alt.X("Score:Q", scale=alt.Scale(domain=[0, 1]), title=None, axis=alt.Axis(format="%")),
+                                        y=alt.Y("Emotion:N", sort="-x", title=None),
+                                        color=alt.Color("Emotion:N", legend=None, scale=alt.Scale(scheme="tableau10")),
+                                        tooltip=["Emotion", alt.Tooltip("Score:Q", format=".1%")]
+                                    ).properties(height=170)
+                                    st.altair_chart(emotion_chart, use_container_width=True)
+                                else:
+                                    st.caption("No face detected in this photo.")
+
+                                fatigue_icon = "🔴" if fatigue_label == "High Fatigue" else ("🟡" if fatigue_label == "Medium Fatigue" else "🟢")
+                                st.caption(f"{fatigue_icon} **{fatigue_label}** ({fatigue_score}/10) | ⚡ Beast Mode: {beast_mode_dict[w['Activity ID']]}%")
+                                st.info(f"🎵 {w['Songs Played']} songs | **{w['Average Track BPM']} BPM**")
+
                                 pe_label = f" • 🔥 Effort: {w['Perceived Exertion']}/10" if w['Perceived Exertion'] > 0 else ""
                                 pre_label = f" • 💪 Rel. Effort: {w['Perceived Relative Effort']}" if w.get('Perceived Relative Effort', 0) > 0 else ""
-                                st.caption(f"{pe_label}{pre_label}")
+                                if pe_label or pre_label:
+                                    st.caption(f"{pe_label}{pre_label}")
                             col_idx += 1
                 else:
                     st.info("No matching images found for the filtered workouts.")

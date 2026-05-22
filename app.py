@@ -43,7 +43,7 @@ def apply_theme(step):
     elif step == 3:
         # Strava Theme (Deep Orange)
         bg1, bg2, bg3 = "#131313", "#2F2F2F", "#131313"
-        accent_light, accent_dark = "#FF7F50", "#FC4C02"
+        accent_light, accent_dark = "#896A5E", "#FC4C02"
     else:
         # Combined Analysis Theme (Deep Ocean)
         bg1, bg2, bg3 = "#0A131F", "#0F2D54", "#0A131F"

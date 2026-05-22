@@ -1,0 +1,8 @@
+# Optional local-only dependencies for FER facial-expression analysis.
+# These are intentionally kept out of requirements.txt because Streamlit
+# Community Cloud has tight memory/build limits and this stack is very large.
+-r requirements.txt
+numpy==1.26.4
+tensorflow==2.15.1
+opencv-contrib-python==4.10.0.84
+fer==22.5.1

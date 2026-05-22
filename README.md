@@ -23,6 +23,13 @@ All processing happens locally in your browser session. No personal data is stor
 pip install -r requirements.txt
 ```
 
+Optional facial-expression analysis for workout photos needs a much larger ML
+stack. Install it locally only when you need that feature:
+
+```bash
+pip install -r requirements-ml.txt
+```
+
 ## Running the App
 
 ```bash

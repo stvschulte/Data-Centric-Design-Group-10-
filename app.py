@@ -18,7 +18,7 @@ def _ensure_fer_deps():
         import cv2, numpy, tensorflow
         from fer.fer import FER
         return True
-    except ImportError:
+    except Exception:
         return False
 
 _FER_AVAILABLE = _ensure_fer_deps()

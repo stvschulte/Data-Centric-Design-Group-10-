@@ -8,13 +8,30 @@ import io
 from datetime import datetime
 from PIL import Image as PILImage
 
-try:
+def _ensure_fer_deps():
+    try:
+        import cv2, numpy, tensorflow
+        from fer.fer import FER
+        return True
+    except ImportError:
+        import subprocess, sys
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install",
+             "fer>=22.5.0", "tensorflow-cpu>=2.14.0",
+             "opencv-python>=4.8.0", "Pillow>=10.0.0", "-q"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        try:
+            import cv2, numpy, tensorflow
+            from fer.fer import FER
+            return True
+        except ImportError:
+            return False
+
+_FER_AVAILABLE = _ensure_fer_deps()
+if _FER_AVAILABLE:
     import cv2
     import numpy as np
-    from fer.fer import FER as _FER
-    _FER_AVAILABLE = True
-except ImportError:
-    _FER_AVAILABLE = False
 
 # -----------------------------------------------------------------------------
 # Configuration & State Management

@@ -226,5 +226,4 @@ def render_spotify_feature() -> None:
     st.divider()
     if st.button("Next: Upload Strava Data", type="primary", use_container_width=True):
         st.session_state.current_page = "Strava Upload"
-        st.session_state.participant_nav = "Strava Upload"
         st.rerun()

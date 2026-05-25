@@ -208,11 +208,9 @@ def render_combined_insights() -> None:
         cols = st.columns(2)
         if cols[0].button("Go to Spotify Upload", use_container_width=True):
             st.session_state.current_page = "Spotify Upload"
-            st.session_state.participant_nav = "Spotify Upload"
             st.rerun()
         if cols[1].button("Go to Strava Upload", use_container_width=True):
             st.session_state.current_page = "Strava Upload"
-            st.session_state.participant_nav = "Strava Upload"
             st.rerun()
         return
 

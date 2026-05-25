@@ -182,5 +182,4 @@ def render_strava_feature() -> None:
     st.divider()
     if st.button("Next: View Combined Insights", type="primary", use_container_width=True):
         st.session_state.current_page = "Combined Insights"
-        st.session_state.participant_nav = "Combined Insights"
         st.rerun()

@@ -79,7 +79,6 @@ def render_consent_page() -> None:
             st.session_state.participant_id = participant_id
             st.session_state.consent_given = True
             st.session_state.current_page = "Spotify Upload"
-            st.session_state.participant_nav = "Spotify Upload"
             st.rerun()
     else:
         st.info("Check all three consent items to continue.")

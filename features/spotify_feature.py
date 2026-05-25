@@ -69,13 +69,19 @@ def inject_spotify_css() -> None:
 
 
 def parse_spotify_json(uploaded_files) -> pd.DataFrame:
-    """Parse Spotify Extended Streaming History JSON using the exact export schema.
+    """Parse Spotify history JSON and normalize it to the internal schema.
 
-    Expected source columns:
+    Preferred Extended Streaming History source columns:
     - ts: track timestamp
     - master_metadata_track_name: track title
     - master_metadata_album_artist_name: artist
     - ms_played: listening duration in milliseconds
+
+    Also supported: older StreamingHistory_music_*.json exports with:
+    - endTime
+    - trackName
+    - artistName
+    - msPlayed
     """
     rows = []
     for uploaded_file in uploaded_files:
@@ -98,12 +104,32 @@ def parse_spotify_json(uploaded_files) -> pd.DataFrame:
         return pd.DataFrame(columns=REQUIRED_SPOTIFY_COLUMNS)
 
     raw_df = pd.DataFrame(rows)
-    missing = [column for column in REQUIRED_SPOTIFY_COLUMNS if column not in raw_df.columns]
-    if missing:
-        st.error(f"Spotify JSON is missing required columns: {', '.join(missing)}")
+    is_extended_history = set(REQUIRED_SPOTIFY_COLUMNS).issubset(raw_df.columns)
+    legacy_columns = ["endTime", "trackName", "artistName", "msPlayed"]
+    is_legacy_history = set(legacy_columns).issubset(raw_df.columns)
+
+    if is_extended_history:
+        df = raw_df[REQUIRED_SPOTIFY_COLUMNS].copy()
+    elif is_legacy_history:
+        # Older Spotify exports use local endTime without timezone information.
+        df = raw_df[legacy_columns].rename(
+            columns={
+                "endTime": "ts",
+                "trackName": "master_metadata_track_name",
+                "artistName": "master_metadata_album_artist_name",
+                "msPlayed": "ms_played",
+            }
+        )
+        st.info("Detected Spotify Streaming History format and converted it for analysis.")
+    else:
+        st.error(
+            "Spotify JSON is missing required columns. Expected either Extended History "
+            "`ts`, `master_metadata_track_name`, `master_metadata_album_artist_name`, `ms_played` "
+            "or Streaming History `endTime`, `trackName`, `artistName`, `msPlayed`."
+        )
+        st.caption(f"Detected columns: {', '.join(raw_df.columns.astype(str).tolist())}")
         return pd.DataFrame(columns=REQUIRED_SPOTIFY_COLUMNS)
 
-    df = raw_df[REQUIRED_SPOTIFY_COLUMNS].copy()
     df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
     if getattr(df["ts"].dt, "tz", None) is not None:
         df["ts"] = df["ts"].dt.tz_convert(None)

@@ -1,9 +1,7 @@
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-
-from features.spotify_feature import generate_mock_spotify_dataframe
-from features.strava_feature import generate_mock_strava_dataframe
 
 
 GREEN = "#1DB954"
@@ -37,7 +35,7 @@ def inject_combined_css() -> None:
         .combined-hero h1 {{
             margin: 0;
             color: #ffffff;
-            font-size: 54px;
+            font-size: 52px;
             font-weight: 850;
             letter-spacing: 0;
         }}
@@ -62,147 +60,133 @@ def inject_combined_css() -> None:
     )
 
 
-def prepare_mock_merge(spotify_df: pd.DataFrame, strava_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    spotify = spotify_df.copy()
-    strava = strava_df.copy().sort_values("start_time").reset_index(drop=True)
-    spotify["timestamp"] = pd.to_datetime(spotify["timestamp"])
-    strava["start_time"] = pd.to_datetime(strava["start_time"])
-    strava["end_time"] = pd.to_datetime(strava["end_time"])
+def merge_tracks_into_workouts(spotify_df: pd.DataFrame, strava_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Match Spotify tracks to Strava workout windows using exact timestamps.
 
-    # Keep the mock timelines aligned so each workout has tracks inside its window.
-    aligned_timestamps = []
-    for idx in range(len(spotify)):
-        workout = strava.iloc[idx % len(strava)]
-        offset_minutes = (idx % 10) * 4
-        timestamp = workout["start_time"] + pd.Timedelta(minutes=offset_minutes)
-        if timestamp > workout["end_time"]:
-            timestamp = workout["start_time"] + pd.Timedelta(minutes=1)
-        aligned_timestamps.append(timestamp)
-    spotify["timestamp"] = aligned_timestamps
+    For each Strava row:
+    - start_time = Activity Date
+    - end_time = Activity Date + Elapsed Time seconds
+    - matched Spotify rows satisfy start_time <= ts <= end_time
+    """
+    spotify = spotify_df.copy()
+    strava = strava_df.copy().sort_values("Activity Date").reset_index(drop=True)
+    spotify["ts"] = pd.to_datetime(spotify["ts"], errors="coerce")
+    strava["Activity Date"] = pd.to_datetime(strava["Activity Date"], errors="coerce")
+    strava["Elapsed Time"] = pd.to_numeric(strava["Elapsed Time"], errors="coerce")
+
+    if getattr(spotify["ts"].dt, "tz", None) is not None:
+        spotify["ts"] = spotify["ts"].dt.tz_convert(None)
+    if getattr(strava["Activity Date"].dt, "tz", None) is not None:
+        strava["Activity Date"] = strava["Activity Date"].dt.tz_convert(None)
 
     workout_rows = []
     track_rows = []
     for idx, workout in strava.iterrows():
-        tracks = spotify[
-            (spotify["timestamp"] >= workout["start_time"])
-            & (spotify["timestamp"] <= workout["end_time"])
-        ].copy()
+        start_time = workout["Activity Date"]
+        end_time = start_time + pd.to_timedelta(workout["Elapsed Time"], unit="s")
+        workout_label = f"{workout['Activity Name']} ({start_time:%Y-%m-%d %H:%M})"
 
-        if tracks.empty:
-            avg_bpm = None
-        else:
-            avg_bpm = tracks["estimated_bpm"].mean()
+        matched_tracks = spotify[(spotify["ts"] >= start_time) & (spotify["ts"] <= end_time)].copy()
+        tracklist = [
+            f"{row['master_metadata_track_name']} - {row['master_metadata_album_artist_name']}"
+            for _, row in matched_tracks.iterrows()
+        ]
 
-        workout_id = f"Workout {idx + 1}"
         workout_rows.append(
             {
-                "workout_id": workout_id,
-                "start_time": workout["start_time"],
-                "duration_minutes": workout["duration_minutes"],
-                "workout_type": workout["workout_type"],
-                "tracks_played": len(tracks),
-                "average_bpm": avg_bpm,
+                "workout_id": idx + 1,
+                "Workout": workout_label,
+                "Activity Name": workout["Activity Name"],
+                "Activity Type": workout["Activity Type"],
+                "Start": start_time,
+                "End": end_time,
+                "Duration Minutes": workout["Elapsed Time"] / 60,
+                "Tracks Played": len(matched_tracks),
+                "Tracklist": ", ".join(tracklist) if tracklist else "No Spotify tracks during workout",
             }
         )
 
-        for _, track in tracks.iterrows():
+        for _, track in matched_tracks.iterrows():
             track_rows.append(
                 {
-                    "workout_id": workout_id,
-                    "workout_type": workout["workout_type"],
-                    "workout_start": workout["start_time"],
-                    "duration_minutes": workout["duration_minutes"],
-                    "track_time": track["timestamp"],
-                    "track_name": track["track_name"],
-                    "artist_name": track["artist_name"],
-                    "estimated_bpm": track["estimated_bpm"],
+                    "workout_id": idx + 1,
+                    "Workout": workout_label,
+                    "Activity Type": workout["Activity Type"],
+                    "Track Time": track["ts"],
+                    "Track": track["master_metadata_track_name"],
+                    "Artist": track["master_metadata_album_artist_name"],
+                    "ms_played": track["ms_played"],
                 }
             )
 
     return pd.DataFrame(workout_rows), pd.DataFrame(track_rows)
 
 
-def render_music_during_workouts(workouts_df: pd.DataFrame, tracks_df: pd.DataFrame) -> None:
-    st.subheader("Music During Workouts")
-    workout_options = workouts_df["workout_id"].tolist()
-    selected_workout = st.selectbox("Select workout session", workout_options)
-    workout_tracks = tracks_df[tracks_df["workout_id"] == selected_workout]
+def render_timeline(workouts_df: pd.DataFrame, tracks_df: pd.DataFrame) -> None:
+    fig = px.timeline(
+        workouts_df,
+        x_start="Start",
+        x_end="End",
+        y="Workout",
+        color="Activity Type",
+        hover_data=["Duration Minutes", "Tracks Played"],
+        title="Workout Timeline with Spotify Track Markers",
+        color_discrete_sequence=[ORANGE, GREEN, "#2563EB", "#9333EA", "#F59E0B"],
+    )
+    fig.update_yaxes(autorange="reversed")
 
-    if workout_tracks.empty:
-        st.info("No tracks were matched to this workout window.")
-        return
-
-    display_df = workout_tracks[["track_time", "track_name", "artist_name", "estimated_bpm"]].copy()
-    display_df["track_time"] = display_df["track_time"].dt.strftime("%H:%M")
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-
-def render_bpm_scatter(workouts_df: pd.DataFrame) -> None:
-    scored = workouts_df.dropna(subset=["average_bpm"])
-    fig = go.Figure()
-    for workout_type, data in scored.groupby("workout_type"):
+    if not tracks_df.empty:
         fig.add_trace(
             go.Scatter(
-                x=data["duration_minutes"],
-                y=data["average_bpm"],
+                x=tracks_df["Track Time"],
+                y=tracks_df["Workout"],
                 mode="markers",
-                name=workout_type,
-                marker=dict(size=data["tracks_played"].clip(lower=1) * 2 + 10, opacity=0.82),
-                customdata=data[["workout_id", "tracks_played"]],
-                hovertemplate=(
-                    "Workout: %{customdata[0]}<br>"
-                    "Type: " + workout_type + "<br>"
-                    "Duration: %{x:.0f} min<br>"
-                    "Avg BPM: %{y:.0f}<br>"
-                    "Tracks: %{customdata[1]}<extra></extra>"
-                ),
+                name="Spotify track",
+                marker=dict(color=GREEN, size=9, symbol="diamond", line=dict(color="#ffffff", width=1)),
+                customdata=tracks_df[["Track", "Artist"]],
+                hovertemplate="Track: %{customdata[0]}<br>Artist: %{customdata[1]}<br>Time: %{x}<extra></extra>",
             )
         )
-    fig.update_layout(
-        title="BPM vs. Workout Duration and Type",
-        xaxis_title="Workout duration minutes",
-        yaxis_title="Average listening BPM",
-        template="plotly_dark",
-        height=460,
-        margin=dict(l=20, r=20, t=70, b=20),
-    )
+
+    fig.update_layout(template="plotly_dark", height=620, margin=dict(l=10, r=10, t=70, b=10))
     st.plotly_chart(fig, use_container_width=True)
 
 
-def render_overlay_chart(workouts_df: pd.DataFrame) -> None:
-    ordered = workouts_df.sort_values("start_time")
-    fig = go.Figure()
-    fig.add_trace(
-        go.Bar(
-            x=ordered["start_time"],
-            y=ordered["duration_minutes"],
-            name="Workout duration",
-            marker_color=ORANGE,
-            opacity=0.82,
-            yaxis="y",
-        )
+def render_artist_bar(tracks_df: pd.DataFrame) -> None:
+    if tracks_df.empty:
+        st.info("No Spotify artists were found inside the uploaded workout windows.")
+        return
+
+    artist_counts = (
+        tracks_df.groupby(["Artist", "Activity Type"], as_index=False)
+        .size()
+        .sort_values("size", ascending=False)
     )
-    fig.add_trace(
-        go.Scatter(
-            x=ordered["start_time"],
-            y=ordered["average_bpm"],
-            name="Average listening BPM",
-            mode="lines+markers",
-            line=dict(color=GREEN, width=4),
-            marker=dict(size=9),
-            yaxis="y2",
-        )
+    top_artists = artist_counts.groupby("Artist")["size"].sum().nlargest(10).index
+    artist_counts = artist_counts[artist_counts["Artist"].isin(top_artists)]
+
+    fig = px.bar(
+        artist_counts,
+        x="Artist",
+        y="size",
+        color="Activity Type",
+        barmode="group",
+        labels={"size": "Tracks played during workouts"},
+        title="Most Listened to Artists During Workouts",
+        color_discrete_sequence=[GREEN, ORANGE, "#2563EB", "#9333EA", "#F59E0B"],
     )
-    fig.update_layout(
-        title="Workout Duration Overlaid with Average Listening BPM",
-        template="plotly_dark",
-        height=480,
-        yaxis=dict(title="Duration minutes", side="left"),
-        yaxis2=dict(title="Average BPM", overlaying="y", side="right", showgrid=False),
-        legend=dict(orientation="h", y=1.12),
-        margin=dict(l=20, r=20, t=80, b=20),
-    )
+    fig.update_layout(template="plotly_dark", height=480, margin=dict(l=10, r=10, t=70, b=10))
     st.plotly_chart(fig, use_container_width=True)
+
+
+def render_workout_track_table(workouts_df: pd.DataFrame) -> None:
+    display_df = workouts_df[
+        ["Activity Name", "Activity Type", "Start", "End", "Duration Minutes", "Tracks Played", "Tracklist"]
+    ].copy()
+    display_df["Start"] = display_df["Start"].dt.strftime("%Y-%m-%d %H:%M")
+    display_df["End"] = display_df["End"].dt.strftime("%Y-%m-%d %H:%M")
+    display_df["Duration Minutes"] = display_df["Duration Minutes"].round(1)
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 
 def render_combined_insights() -> None:
@@ -210,25 +194,37 @@ def render_combined_insights() -> None:
     st.markdown(
         """
         <section class="combined-hero">
-            <h1>Music x Movement Dashboard</h1>
-            <p>A unified view of workout windows and listening tempo, designed to reveal how training sessions line up with music behavior.</p>
+            <h1>Combined Music x Workout Insights</h1>
+            <p>Spotify tracks are matched into exact Strava workout time windows using uploaded participant data only.</p>
         </section>
         """,
         unsafe_allow_html=True,
     )
 
-    if not st.session_state.spotify_uploaded or not st.session_state.strava_uploaded:
-        st.warning("Upload both Spotify and Strava files to replace this demo with participant-specific data.")
+    spotify_df = st.session_state.get("spotify_df")
+    strava_df = st.session_state.get("strava_df")
+    if spotify_df is None or strava_df is None or spotify_df.empty or strava_df.empty:
+        st.warning("Spotify and Strava uploads are both required before combined insights can be generated.")
+        cols = st.columns(2)
+        if cols[0].button("Go to Spotify Upload", use_container_width=True):
+            st.session_state.current_page = "Spotify Upload"
+            st.session_state.participant_nav = "Spotify Upload"
+            st.rerun()
+        if cols[1].button("Go to Strava Upload", use_container_width=True):
+            st.session_state.current_page = "Strava Upload"
+            st.session_state.participant_nav = "Strava Upload"
+            st.rerun()
+        return
 
-    spotify_df = st.session_state.get("spotify_mock_df", generate_mock_spotify_dataframe())
-    strava_df = st.session_state.get("strava_mock_df", generate_mock_strava_dataframe())
-    workouts_df, tracks_df = prepare_mock_merge(spotify_df, strava_df)
+    workouts_df, tracks_df = merge_tracks_into_workouts(spotify_df, strava_df)
 
-    cols = st.columns(3)
-    cols[0].metric("Matched Workouts", f"{len(workouts_df):,}")
-    cols[1].metric("Tracks During Workouts", f"{len(tracks_df):,}")
-    cols[2].metric("Average Workout BPM", f"{workouts_df['average_bpm'].mean():.0f}" if workouts_df["average_bpm"].notna().any() else "N/A")
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("Workouts Analyzed", f"{len(workouts_df):,}")
+    metric_cols[1].metric("Workout Tracks Found", f"{len(tracks_df):,}")
+    metric_cols[2].metric("Workouts with Music", f"{(workouts_df['Tracks Played'] > 0).sum():,}")
 
-    render_music_during_workouts(workouts_df, tracks_df)
-    render_bpm_scatter(workouts_df)
-    render_overlay_chart(workouts_df)
+    render_timeline(workouts_df, tracks_df)
+    render_artist_bar(tracks_df)
+
+    st.subheader("Exact Tracklist by Workout")
+    render_workout_track_table(workouts_df)

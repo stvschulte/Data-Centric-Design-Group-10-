@@ -29,6 +29,8 @@ def init_session_state() -> None:
         "spotify_uploaded": False,
         "strava_uploaded": False,
         "researcher_authenticated": False,
+        "participant_nav": "Consent",
+        "researcher_nav": "None",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -43,6 +45,7 @@ def render_sidebar() -> str:
         "Participant pages",
         list(PARTICIPANT_PAGES.keys()),
         label_visibility="collapsed",
+        key="participant_nav",
     )
 
     st.sidebar.header("Researcher Area")
@@ -50,12 +53,14 @@ def render_sidebar() -> str:
         "Researcher pages",
         ["None"] + list(RESEARCHER_PAGES.keys()),
         label_visibility="collapsed",
+        key="researcher_nav",
     )
 
     selected_page = researcher_choice if researcher_choice != "None" else participant_choice
 
     if selected_page in PARTICIPANT_PAGES and not st.session_state.consent_given:
         selected_page = "Consent"
+        st.session_state.participant_nav = "Consent"
         st.sidebar.warning("Consent is required before continuing.")
 
     st.session_state.current_page = selected_page

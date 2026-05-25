@@ -7,12 +7,37 @@ from utils.db_handler import create_participant
 
 
 def render_consent_page() -> None:
-    st.title("Informed Consent")
-    st.write(
-        "Please read each section carefully. You can only continue after all consent "
-        "items have been checked."
+    st.markdown(
+        """
+        <style>
+        .consent-shell {
+            padding: 42px 44px;
+            border-radius: 18px;
+            background: linear-gradient(135deg, rgba(15,23,42,0.92), rgba(30,41,59,0.82));
+            border: 1px solid rgba(148,163,184,0.22);
+            color: #f8fafc;
+            margin-bottom: 26px;
+        }
+        .consent-shell h1 {
+            margin: 0;
+            font-size: 48px;
+            font-weight: 850;
+            letter-spacing: 0;
+        }
+        .consent-shell p {
+            max-width: 820px;
+            color: #cbd5e1;
+            font-size: 18px;
+            line-height: 1.6;
+        }
+        </style>
+        <section class="consent-shell">
+            <h1>Informed Consent</h1>
+            <p>Review the study information below. You can continue only after confirming each consent statement.</p>
+        </section>
+        """,
+        unsafe_allow_html=True,
     )
-
     with st.expander("Purpose", expanded=True):
         st.write(
             "This study explores relationships between personal activity data, music "
@@ -54,6 +79,7 @@ def render_consent_page() -> None:
             st.session_state.participant_id = participant_id
             st.session_state.consent_given = True
             st.session_state.current_page = "Spotify Upload"
+            st.session_state.participant_nav = "Spotify Upload"
             st.rerun()
     else:
         st.info("Check all three consent items to continue.")

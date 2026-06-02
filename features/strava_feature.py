@@ -1,12 +1,37 @@
+import os
+import re
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from utils.db_handler import log_strava_upload
+from utils.db_handler import log_strava_upload, save_strava_activities
 
 
 STRAVA_ORANGE = "#FC4C02"
-REQUIRED_STRAVA_COLUMNS = ["Activity Date", "Elapsed Time", "Activity Name", "Activity Type"]
+HR_ZONE_COLORS = {
+    "Zone 1 (Recovery)": "#FFD7C2",
+    "Zone 2 (Endurance)": "#FFB088",
+    "Zone 3 (Tempo)": "#FC7A30",
+    "Zone 4 (Threshold)": "#E04412",
+    "Zone 5 (Anaerobic/Max)": "#A31312",
+}
+HR_ZONE_BACKGROUNDS = [
+    ("Zone 1", 60, 110, "rgba(128, 128, 128, 0.15)"),
+    ("Zone 2", 110, 130, "rgba(46, 204, 113, 0.15)"),
+    ("Zone 3", 130, 150, "rgba(241, 196, 15, 0.15)"),
+    ("Zone 4", 150, 170, "rgba(230, 126, 34, 0.15)"),
+    ("Zone 5", 170, 220, "rgba(231, 76, 60, 0.15)"),
+]
+
+COLUMN_VARIANTS = {
+    "standard_date": ["Activity Date", "activity date", "Date", "start_time"],
+    "standard_duration": ["Elapsed Time", "elapsed time", "Duration", "Time", "Moving Time"],
+    "standard_name": ["Activity Name", "activity name", "Name", "Title"],
+    "standard_type": ["Activity Type", "activity type", "Type"],
+    "standard_hr": ["Average Heart Rate", "average heart rate", "Heart Rate"],
+}
+REQUIRED_STANDARD_COLUMNS = ["standard_date", "standard_duration", "standard_type"]
 
 
 def inject_strava_css() -> None:
@@ -15,44 +40,52 @@ def inject_strava_css() -> None:
         <style>
         .stApp {{
             background:
-                linear-gradient(90deg, rgba(255,255,255,0.98), rgba(255,247,242,0.94)),
+                linear-gradient(135deg, rgba(7, 10, 18, 0.96), rgba(18, 20, 28, 0.92)),
                 url("https://images.unsplash.com/photo-1502904550040-7534597429ae?auto=format&fit=crop&w=1800&q=80");
             background-size: cover;
             background-position: center;
             background-attachment: fixed;
-            color: #18181b;
+            color: #f8fafc;
         }}
         .strava-hero {{
-            min-height: 250px;
-            padding: 56px 54px;
+            min-height: 220px;
+            padding: 48px 46px;
             border-radius: 18px;
-            background: linear-gradient(135deg, rgba(252,76,2,0.18), rgba(255,255,255,0.88));
-            border: 1px solid rgba(252,76,2,0.34);
-            box-shadow: 0 24px 80px rgba(35,24,18,0.18);
-            margin-bottom: 28px;
+            background: linear-gradient(135deg, rgba(252,76,2,0.30), rgba(9,11,18,0.88));
+            border: 1px solid rgba(252,76,2,0.38);
+            box-shadow: 0 24px 80px rgba(0,0,0,0.40);
+            margin-bottom: 24px;
         }}
         .strava-hero h1 {{
             margin: 0;
-            color: #111827;
-            font-size: 52px;
+            color: #ffffff;
+            font-size: 48px;
             font-weight: 850;
             letter-spacing: 0;
         }}
         .strava-hero p {{
             max-width: 760px;
-            color: #3f3f46;
+            color: #ffe6dc;
             font-size: 18px;
             line-height: 1.6;
         }}
         div[data-testid="stMetric"] {{
-            background: rgba(255,255,255,0.94);
-            border: 1px solid rgba(252,76,2,0.25);
+            background: rgba(9, 11, 18, 0.88);
+            border: 1px solid rgba(252,76,2,0.30);
             border-radius: 14px;
             padding: 18px;
-            box-shadow: 0 10px 32px rgba(17,24,39,0.08);
+            box-shadow: 0 14px 42px rgba(0,0,0,0.26);
+        }}
+        div[data-testid="stMetricLabel"] {{
+            color: #cbd5e1;
+            font-weight: 700;
         }}
         div[data-testid="stMetricValue"] {{
             color: {STRAVA_ORANGE};
+            font-weight: 850;
+        }}
+        .stButton > button, [data-testid="stFileUploader"] button {{
+            border-color: {STRAVA_ORANGE} !important;
         }}
         </style>
         """,
@@ -60,88 +93,259 @@ def inject_strava_css() -> None:
     )
 
 
-def parse_strava_csv(uploaded_files) -> pd.DataFrame:
-    """Parse Strava CSV using the exact columns required by the project.
+def normalize_column_name(column_name: str) -> str:
+    """Normalize headers so small Strava CSV naming differences do not break parsing."""
+    return re.sub(r"[^a-z0-9]+", "", str(column_name).strip().lower())
 
-    Expected source columns:
-    - Activity Date: workout start timestamp
-    - Elapsed Time: workout duration in seconds
-    - Activity Name: display name
-    - Activity Type: workout category
-    """
+
+def build_strava_column_mapping(columns: pd.Index) -> dict[str, str]:
+    """Map Strava export headers onto internal standard_* column names."""
+    cleaned_columns = [str(column).replace("\ufeff", "").strip() for column in columns]
+    exact_lookup = {column: column for column in cleaned_columns}
+    normalized_lookup = {normalize_column_name(column): column for column in cleaned_columns}
+
+    mapping = {}
+    for standard_name, variants in COLUMN_VARIANTS.items():
+        for variant in variants:
+            if variant in exact_lookup:
+                mapping[exact_lookup[variant]] = standard_name
+                break
+
+            normalized_variant = normalize_column_name(variant)
+            if normalized_variant in normalized_lookup:
+                mapping[normalized_lookup[normalized_variant]] = standard_name
+                break
+
+    return mapping
+
+
+def parse_duration_to_seconds(duration_series: pd.Series) -> pd.Series:
+    """Convert numeric seconds or HH:MM:SS-style duration values to seconds."""
+    numeric_duration = pd.to_numeric(duration_series, errors="coerce")
+    needs_timedelta = numeric_duration.isna() & duration_series.notna()
+    if needs_timedelta.any():
+        timedelta_duration = pd.to_timedelta(duration_series[needs_timedelta], errors="coerce")
+        numeric_duration.loc[needs_timedelta] = timedelta_duration.dt.total_seconds()
+    return numeric_duration
+
+
+def parse_strava_csv(uploaded_files) -> pd.DataFrame:
     frames = []
     for uploaded_file in uploaded_files:
         try:
-            frames.append(pd.read_csv(uploaded_file))
+            # Strava CSVs can be comma- or semicolon-delimited depending on export locale.
+            frames.append(pd.read_csv(uploaded_file, sep=None, engine="python"))
         except Exception as exc:
             st.error(f"Could not read `{uploaded_file.name}` as CSV: {exc}")
 
     if not frames:
-        return pd.DataFrame(columns=REQUIRED_STRAVA_COLUMNS)
+        return pd.DataFrame()
 
     raw_df = pd.concat(frames, ignore_index=True)
     raw_df.columns = [str(column).replace("\ufeff", "").strip() for column in raw_df.columns]
-    missing = [column for column in REQUIRED_STRAVA_COLUMNS if column not in raw_df.columns]
-    if missing:
-        st.error(f"Strava CSV is missing required columns: {', '.join(missing)}")
+    column_mapping = build_strava_column_mapping(raw_df.columns)
+    mapped_standard_columns = set(column_mapping.values())
+
+    if not set(REQUIRED_STANDARD_COLUMNS).issubset(mapped_standard_columns):
+        st.error(
+            "Could not find required columns in this CSV. Please ensure you are uploading the 'activities.csv' from your Strava export."
+        )
         st.caption(f"Detected columns: {', '.join(raw_df.columns.astype(str).tolist())}")
-        return pd.DataFrame(columns=REQUIRED_STRAVA_COLUMNS)
+        st.stop()
 
-    df = raw_df[REQUIRED_STRAVA_COLUMNS].copy()
-    df["Activity Date"] = pd.to_datetime(df["Activity Date"], errors="coerce")
-    if getattr(df["Activity Date"].dt, "tz", None) is not None:
-        df["Activity Date"] = df["Activity Date"].dt.tz_convert(None)
+    df = raw_df.rename(columns=column_mapping).copy()
+    selected_columns = list(dict.fromkeys(column_mapping.values()))
+    df = df[selected_columns]
 
-    df["Elapsed Time"] = pd.to_numeric(df["Elapsed Time"], errors="coerce")
-    df["Activity Name"] = df["Activity Name"].fillna("Unknown").replace("", "Unknown")
-    df["Activity Type"] = df["Activity Type"].fillna("Unknown").replace("", "Unknown")
+    if "standard_name" not in df.columns:
+        df["standard_name"] = "Unnamed Strava Activity"
+    if "standard_hr" not in df.columns:
+        df["standard_hr"] = pd.NA
 
-    # Invalid timestamps or missing durations cannot be used for time-window merging.
-    df = df.dropna(subset=["Activity Date", "Elapsed Time"])
-    df = df[df["Elapsed Time"] > 0]
-    return df.sort_values("Activity Date").reset_index(drop=True)
+    df["standard_date"] = pd.to_datetime(df["standard_date"], errors="coerce")
+    if getattr(df["standard_date"].dt, "tz", None) is not None:
+        df["standard_date"] = df["standard_date"].dt.tz_convert(None)
+
+    df["standard_duration"] = parse_duration_to_seconds(df["standard_duration"])
+    df["standard_hr"] = pd.to_numeric(df["standard_hr"], errors="coerce")
+    df["standard_name"] = df["standard_name"].fillna("Unnamed Strava Activity").replace("", "Unnamed Strava Activity")
+    df["standard_type"] = df["standard_type"].fillna("Unknown").replace("", "Unknown")
+
+    df = df.dropna(subset=["standard_date", "standard_duration", "standard_type"])
+    df = df[df["standard_duration"] > 0]
+    return df.sort_values("standard_date").reset_index(drop=True)
 
 
 def render_strava_kpis(df: pd.DataFrame) -> None:
-    total_workouts = len(df)
-    total_hours = df["Elapsed Time"].sum() / 3600
-    most_common_type = df["Activity Type"].mode().iloc[0] if not df.empty else "N/A"
+    total_activities = len(df)
+    total_hours = df["standard_duration"].sum() / 3600
+    most_common_type = df["standard_type"].mode().iloc[0] if not df.empty else "N/A"
 
     cols = st.columns(3)
-    cols[0].metric("Total Workouts", f"{total_workouts:,}")
+    cols[0].metric("Total Activities", f"{total_activities:,}")
     cols[1].metric("Total Active Hours", f"{total_hours:,.1f}")
-    cols[2].metric("Most Frequent Type", most_common_type)
+    cols[2].metric("Most Frequent Workout Type", most_common_type)
+
+
+def apply_dark_plotly_layout(fig, top_margin: int = 62) -> None:
+    # High-contrast Plotly styling: transparent backgrounds blend into the dark page,
+    # while white 14px text keeps titles, ticks, and axis labels readable.
+    fig.update_layout(
+        font=dict(color="white", size=14),
+        title_font=dict(color="white", size=20),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=10, r=10, t=top_margin, b=10),
+        xaxis=dict(tickfont=dict(color="white", size=13), title_font=dict(color="white", size=14)),
+        yaxis=dict(tickfont=dict(color="white", size=13), title_font=dict(color="white", size=14)),
+    )
+
+
+def render_workout_type_distribution(df: pd.DataFrame) -> None:
+    type_counts = df["standard_type"].value_counts().reset_index()
+    type_counts.columns = ["Activity Type", "Count"]
+
+    fig = px.bar(
+        type_counts,
+        x="Activity Type",
+        y="Count",
+        title="Workout Types Distribution",
+        height=400,
+        text="Count",
+        color_discrete_sequence=[STRAVA_ORANGE],
+    )
+    fig.update_traces(marker_color=STRAVA_ORANGE, textposition="auto", cliponaxis=False)
+    apply_dark_plotly_layout(fig, top_margin=76)
+    max_count = type_counts["Count"].max()
+    fig.update_yaxes(range=[0, max_count * 1.18 if max_count else 1])
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def assign_hr_zone(heart_rate: float) -> str:
+    """Bucket average heart rate into standard training zones for participant-friendly insight."""
+    if heart_rate < 110:
+        return "Zone 1 (Recovery)"
+    if heart_rate <= 130:
+        return "Zone 2 (Endurance)"
+    if heart_rate <= 150:
+        return "Zone 3 (Tempo)"
+    if heart_rate <= 170:
+        return "Zone 4 (Threshold)"
+    return "Zone 5 (Anaerobic/Max)"
+
+
+def render_hr_zone_distribution(df: pd.DataFrame) -> None:
+    # HR is optional in Strava exports. Check for usable values before plotting
+    # so participants without heart-rate data see a clear message instead of an empty chart.
+    if "standard_hr" not in df.columns or df["standard_hr"].dropna().empty:
+        st.warning("No heart rate data found in your Strava export.")
+        return
+
+    hr_df = df.dropna(subset=["standard_hr"]).copy()
+    hr_df["standard_date"] = pd.to_datetime(hr_df["standard_date"], errors="coerce")
+    hr_df["standard_duration"] = pd.to_numeric(hr_df["standard_duration"], errors="coerce")
+    hr_df = hr_df.dropna(subset=["standard_date", "standard_duration", "standard_hr"])
+    if hr_df.empty:
+        st.warning("No heart rate data found in your Strava export.")
+        return
+
+    hr_df["duration_minutes"] = hr_df["standard_duration"] / 60
+    # Keep the HR zone label in the dataframe for hover context, while the visual
+    # zone structure itself is drawn as infographic background bands.
+    hr_df["HR_Zone"] = hr_df["standard_hr"].apply(assign_hr_zone)
+
+    fig = px.scatter(
+        hr_df,
+        x="standard_date",
+        y="standard_hr",
+        color="standard_type",
+        size="duration_minutes",
+        size_max=25,
+        title="Heart Rate Timeline by Zone",
+        height=400,
+        hover_data={
+            "standard_name": True,
+            "standard_hr": ":.0f",
+            "HR_Zone": True,
+            "duration_minutes": ":.1f",
+            "standard_duration": False,
+        },
+        labels={
+            "standard_date": "Workout Date",
+            "standard_hr": "Average Heart Rate (BPM)",
+            "standard_type": "Activity Type",
+            "duration_minutes": "Duration (minutes)",
+            "HR_Zone": "Heart Rate Zone",
+            "standard_name": "Workout Name",
+        },
+    )
+    fig.update_traces(
+        marker=dict(opacity=0.86, line=dict(color="rgba(255,255,255,0.42)", width=1)),
+    )
+
+    # Draw the HR zone bands behind the scatter points. These soft horizontal
+    # rectangles turn the chart into an infographic: users can read effort zones
+    # by position without relying on extra grid lines.
+    for zone_label, y0, y1, fillcolor in HR_ZONE_BACKGROUNDS:
+        fig.add_hrect(y0=y0, y1=y1, fillcolor=fillcolor, line_width=0, layer="below")
+        fig.add_annotation(
+            x=1.0,
+            y=(y0 + y1) / 2,
+            xref="paper",
+            yref="y",
+            text=zone_label,
+            showarrow=False,
+            xanchor="right",
+            font=dict(color="rgba(255,255,255,0.62)", size=12),
+            bgcolor="rgba(0,0,0,0)",
+        )
+
+    apply_dark_plotly_layout(fig, top_margin=76)
+    # Explicit y-axis boundaries and BPM tick marks make the zone thresholds
+    # legible, while hiding grid lines keeps the colored zone bands visually clean.
+    fig.update_yaxes(
+        range=[60, 200],
+        tickvals=[60, 80, 100, 110, 130, 150, 170, 190, 200],
+        showgrid=False,
+    )
+    fig.update_xaxes(showgrid=False)
+    fig.update_layout(
+        legend_title_text="Activity Type",
+        hoverlabel=dict(bgcolor="rgba(15,23,42,0.96)", font=dict(color="white")),
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def render_strava_charts(df: pd.DataFrame) -> None:
-    chart_df = df.copy()
-    chart_df["Duration Minutes"] = chart_df["Elapsed Time"] / 60
+    left_col, right_col = st.columns(2)
+    with left_col:
+        render_workout_type_distribution(df)
+    with right_col:
+        render_hr_zone_distribution(df)
 
-    fig_scatter = px.scatter(
-        chart_df,
-        x="Activity Date",
-        y="Duration Minutes",
-        size="Duration Minutes",
-        color="Activity Type",
-        hover_data=["Activity Name", "Activity Type", "Duration Minutes"],
-        title="Workouts Over Time",
-        color_discrete_sequence=[STRAVA_ORANGE, "#111827", "#2563EB", "#16A34A", "#9333EA"],
-    )
-    fig_scatter.update_layout(height=470, paper_bgcolor="rgba(255,255,255,0.94)", plot_bgcolor="rgba(255,255,255,0.94)")
-    st.plotly_chart(fig_scatter, use_container_width=True)
 
-    type_counts = chart_df["Activity Type"].value_counts().reset_index()
-    type_counts.columns = ["Activity Type", "Workouts"]
-    fig_donut = px.pie(
-        type_counts,
-        names="Activity Type",
-        values="Workouts",
-        hole=0.55,
-        title="Activity Type Frequency",
-        color_discrete_sequence=[STRAVA_ORANGE, "#111827", "#2563EB", "#16A34A", "#9333EA"],
+def render_workout_photo_uploader() -> None:
+    st.divider()
+    st.subheader("Upload Workout Photos")
+    uploaded_images = st.file_uploader(
+        "Upload pictures from your workouts for manual analysis",
+        type=["png", "jpg", "jpeg"],
+        accept_multiple_files=True,
     )
-    fig_donut.update_layout(height=430, paper_bgcolor="rgba(255,255,255,0.94)")
-    st.plotly_chart(fig_donut, use_container_width=True)
+    if not uploaded_images:
+        return
+
+    p_id = st.session_state.get("participant_id", "unknown_participant")
+    save_dir = f"data/strava_pictures/{p_id}/"
+    os.makedirs(save_dir, exist_ok=True)
+
+    for uploaded_image in uploaded_images:
+        safe_filename = re.sub(r"[^A-Za-z0-9_.-]+", "_", uploaded_image.name)
+        file_path = os.path.join(save_dir, safe_filename)
+        with open(file_path, "wb") as output_file:
+            output_file.write(uploaded_image.getbuffer())
+
+    st.success(f"Pictures saved securely for Participant ID: {p_id}. Ready for OneDrive sync.")
 
 
 def render_strava_feature() -> None:
@@ -150,7 +354,7 @@ def render_strava_feature() -> None:
         """
         <section class="strava-hero">
             <h1>Upload Strava Activities</h1>
-            <p>Use a Strava CSV export with Activity Date, Elapsed Time, Activity Name, and Activity Type columns.</p>
+            <p>Use the activities.csv file from your Strava export. Header variations are detected automatically.</p>
         </section>
         """,
         unsafe_allow_html=True,
@@ -168,16 +372,22 @@ def render_strava_feature() -> None:
         return
 
     logged_files = st.session_state.setdefault("logged_strava_files", set())
+    participant_id = st.session_state.get("participant_id")
     for uploaded_file in uploaded_files:
-        if uploaded_file.name not in logged_files:
-            log_strava_upload(st.session_state.participant_id, uploaded_file.name)
+        if participant_id and uploaded_file.name not in logged_files:
+            log_strava_upload(participant_id, uploaded_file.name)
             logged_files.add(uploaded_file.name)
+
+    if participant_id:
+        source_file = "|".join(uploaded_file.name for uploaded_file in uploaded_files)
+        save_strava_activities(participant_id, df, source_file=source_file)
 
     st.session_state.strava_uploaded = True
     st.session_state.strava_df = df
 
     render_strava_kpis(df)
     render_strava_charts(df)
+    render_workout_photo_uploader()
 
     st.divider()
     if st.button("Next: View Combined Insights", type="primary", use_container_width=True):

@@ -2,7 +2,7 @@ import streamlit as st
 
 from features.combined_insights import render_combined_insights
 from features.consent_page import render_consent_page
-from features.researcher_dashboard import render_researcher_dashboard
+from features.optimized_playlists import render_optimized_playlists
 from features.spotify_feature import render_spotify_feature
 from features.strava_feature import render_strava_feature
 from utils.db_handler import init_db
@@ -13,10 +13,31 @@ PARTICIPANT_PAGES = {
     "Spotify Upload": render_spotify_feature,
     "Strava Upload": render_strava_feature,
     "Combined Insights": render_combined_insights,
+    "Optimized Playlists": render_optimized_playlists,
 }
 
+
+def render_researcher_dashboard_page() -> None:
+    """Load the researcher dashboard only when it is opened.
+
+    Researcher analysis modules depend on scipy. Lazy loading keeps the
+    participant flow usable even when optional researcher dependencies are
+    missing from the local Python environment.
+    """
+    try:
+        from features.researcher_dashboard import render_researcher_dashboard
+    except ModuleNotFoundError as exc:
+        if exc.name == "scipy":
+            st.error("The researcher dashboard requires scipy, which is not installed in this environment.")
+            st.code("python3 -m pip install -r requirements.txt", language="bash")
+            return
+        raise
+
+    render_researcher_dashboard()
+
+
 RESEARCHER_PAGES = {
-    "Researcher Dashboard": render_researcher_dashboard,
+    "Researcher Dashboard": render_researcher_dashboard_page,
 }
 
 

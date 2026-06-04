@@ -8,6 +8,7 @@ import streamlit as st
 
 
 SPOTIFY_GREEN = "#1DB954"
+HEART_RATE_ZONE_IMAGE_URL = "https://www.polar.com/blog/wp-content/uploads/2019/05/Heart-rate-zones-1.jpg"
 ZONE_DEFINITIONS = [
     ("Zone 1", "Recovery", "< 110 BPM", 0, 110),
     ("Zone 2", "Endurance", "110-130 BPM", 110, 131),
@@ -57,9 +58,9 @@ def inject_playlist_css() -> None:
         .zone-card {{
             min-height: 470px;
             padding: 18px;
-            border-radius: 16px;
-            background: rgba(8, 13, 10, 0.90);
-            border: 1px solid rgba(29,185,84,0.24);
+            border-radius: 8px;
+            background: rgba(6, 12, 9, 0.95);
+            border: 1px solid rgba(255,255,255,0.16);
             box-shadow: 0 18px 54px rgba(0,0,0,0.32);
         }}
         .zone-card h2 {{
@@ -70,7 +71,7 @@ def inject_playlist_css() -> None:
         }}
         .zone-target {{
             margin: 5px 0 16px;
-            color: {SPOTIFY_GREEN};
+            color: #5df58c;
             font-size: 0.94rem;
             font-weight: 800;
         }}
@@ -89,12 +90,16 @@ def inject_playlist_css() -> None:
         }}
         .track-meta {{
             margin-top: 4px;
-            color: #94a3b8;
+            color: #d8f8e3;
             font-size: 0.86rem;
             line-height: 1.35;
         }}
+        .track-bpm {{
+            color: #ffffff;
+            font-weight: 850;
+        }}
         .empty-zone {{
-            color: #94a3b8;
+            color: #cbd5e1;
             font-size: 0.92rem;
             line-height: 1.45;
             margin-top: 14px;
@@ -139,7 +144,7 @@ def render_zone_card(zone_name: str, label: str, target_bpm: str, tracks: pd.Dat
                 <div class="track-name">{html.escape(str(row["track_name"]))}</div>
                 <div class="track-meta">
                     {html.escape(str(row["artist_name"]))}<br>
-                    {row["real_bpm"]:.0f} BPM · {row["total_minutes"]:.1f} min listened
+                    <span class="track-bpm">{row["real_bpm"]:.0f} BPM</span> · {row["total_minutes"]:.1f} min listened
                 </div>
             </div>
             """
@@ -169,6 +174,7 @@ def render_optimized_playlists() -> None:
         </section>
         """
     )
+    st.image(HEART_RATE_ZONE_IMAGE_URL, use_column_width=True)
 
     participant_id = st.session_state.get("participant_id")
     augmented_df = st.session_state.get("augmented_music_workout_df")

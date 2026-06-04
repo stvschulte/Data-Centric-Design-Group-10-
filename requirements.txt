@@ -6,3 +6,4 @@ scipy>=1.11.0
 vaderSentiment>=3.3.2
 statsmodels>=0.14.0
 spotipy>=2.25.0
+beautifulsoup4>=4.12.0

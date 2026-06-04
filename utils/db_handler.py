@@ -86,6 +86,7 @@ def init_db() -> None:
                 standard_name TEXT,
                 standard_type TEXT,
                 standard_hr REAL,
+                media TEXT,
                 source_file TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (participant_id) REFERENCES participants (participant_id)
@@ -106,6 +107,7 @@ def init_db() -> None:
         )
 
         _migrate_legacy_participants(conn)
+        _ensure_column(conn, "strava_activities", "media", "TEXT")
 
 
 def _migrate_legacy_participants(conn: sqlite3.Connection) -> None:
@@ -132,6 +134,12 @@ def _migrate_legacy_participants(conn: sqlite3.Connection) -> None:
         SELECT {id_column}, consent_timestamp, status FROM participants_legacy
         """
     )
+
+
+def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    if column_name not in columns:
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
 
 def require_participant_id(participant_id: str) -> str:
@@ -231,6 +239,7 @@ def save_strava_activities(participant_id: str, df: pd.DataFrame, source_file: s
                 row.get("standard_name"),
                 row.get("standard_type"),
                 row.get("standard_hr"),
+                row.get("Media", row.get("media", "")),
                 source_file,
                 utc_now(),
             )
@@ -246,9 +255,9 @@ def save_strava_activities(participant_id: str, df: pd.DataFrame, source_file: s
             """
             INSERT INTO strava_activities (
                 participant_id, standard_date, standard_duration, standard_name,
-                standard_type, standard_hr, source_file, created_at
+                standard_type, standard_hr, media, source_file, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -289,7 +298,7 @@ def fetch_strava_activities(participant_id: str) -> pd.DataFrame:
     with get_connection() as conn:
         df = pd.read_sql_query(
             """
-            SELECT standard_date, standard_duration, standard_name, standard_type, standard_hr, source_file, created_at
+            SELECT standard_date, standard_duration, standard_name, standard_type, standard_hr, media, source_file, created_at
             FROM strava_activities
             WHERE participant_id = ?
             ORDER BY standard_date

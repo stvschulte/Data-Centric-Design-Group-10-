@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import os
 import re
+import time
 
 import pandas as pd
 import plotly.express as px
@@ -30,8 +33,11 @@ COLUMN_VARIANTS = {
     "standard_name": ["Activity Name", "activity name", "Name", "Title"],
     "standard_type": ["Activity Type", "activity type", "Type"],
     "standard_hr": ["Average Heart Rate", "average heart rate", "Heart Rate"],
+    "Media": ["Media", "media"],
 }
 REQUIRED_STANDARD_COLUMNS = ["standard_date", "standard_duration", "standard_type"]
+MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif"}
+UPLOAD_FILE_TYPES = ["csv", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif"]
 
 
 def inject_strava_css() -> None:
@@ -129,19 +135,14 @@ def parse_duration_to_seconds(duration_series: pd.Series) -> pd.Series:
     return numeric_duration
 
 
-def parse_strava_csv(uploaded_files) -> pd.DataFrame:
-    frames = []
-    for uploaded_file in uploaded_files:
-        try:
-            # Strava CSVs can be comma- or semicolon-delimited depending on export locale.
-            frames.append(pd.read_csv(uploaded_file, sep=None, engine="python"))
-        except Exception as exc:
-            st.error(f"Could not read `{uploaded_file.name}` as CSV: {exc}")
-
-    if not frames:
+def parse_strava_csv(csv_file, filename: str = "activities.csv") -> pd.DataFrame:
+    try:
+        # Strava CSVs can be comma- or semicolon-delimited depending on export locale.
+        raw_df = pd.read_csv(csv_file, sep=None, engine="python")
+    except Exception as exc:
+        st.error(f"Could not read `{filename}` as CSV: {exc}")
         return pd.DataFrame()
 
-    raw_df = pd.concat(frames, ignore_index=True)
     raw_df.columns = [str(column).replace("\ufeff", "").strip() for column in raw_df.columns]
     column_mapping = build_strava_column_mapping(raw_df.columns)
     mapped_standard_columns = set(column_mapping.values())
@@ -161,6 +162,8 @@ def parse_strava_csv(uploaded_files) -> pd.DataFrame:
         df["standard_name"] = "Unnamed Strava Activity"
     if "standard_hr" not in df.columns:
         df["standard_hr"] = pd.NA
+    if "Media" not in df.columns:
+        df["Media"] = ""
 
     df["standard_date"] = pd.to_datetime(df["standard_date"], errors="coerce")
     if getattr(df["standard_date"].dt, "tz", None) is not None:
@@ -170,10 +173,92 @@ def parse_strava_csv(uploaded_files) -> pd.DataFrame:
     df["standard_hr"] = pd.to_numeric(df["standard_hr"], errors="coerce")
     df["standard_name"] = df["standard_name"].fillna("Unnamed Strava Activity").replace("", "Unnamed Strava Activity")
     df["standard_type"] = df["standard_type"].fillna("Unknown").replace("", "Unknown")
+    df["Media"] = df["Media"].fillna("").astype(str)
 
     df = df.dropna(subset=["standard_date", "standard_duration", "standard_type"])
     df = df[df["standard_duration"] > 0]
     return df.sort_values("standard_date").reset_index(drop=True)
+
+
+def normalized_upload_basename(file_name: str) -> str:
+    return os.path.basename(file_name.replace("\\", "/")).strip().lower()
+
+
+def find_activities_file(uploaded_files) -> object | None:
+    csv_files = []
+    for uploaded_file in uploaded_files:
+        basename = normalized_upload_basename(uploaded_file.name)
+        if not basename.endswith(".csv"):
+            continue
+
+        csv_files.append(uploaded_file)
+        if basename == "activities.csv":
+            return uploaded_file
+
+    for uploaded_file in csv_files:
+        basename = normalized_upload_basename(uploaded_file.name)
+        if basename.startswith("activities") or "activities" in basename:
+            return uploaded_file
+
+    if len(csv_files) == 1:
+        return csv_files[0]
+
+    return None
+
+
+def render_missing_activities_message(uploaded_files) -> None:
+    uploaded_names = [uploaded_file.name for uploaded_file in uploaded_files]
+    st.error("Could not find `activities.csv`. Upload the unzipped Strava export files, including activities.csv.")
+    if uploaded_names:
+        with st.expander("Files detected"):
+            st.write(uploaded_names[:50])
+            if len(uploaded_names) > 50:
+                st.caption(f"Showing first 50 of {len(uploaded_names)} uploaded files.")
+
+
+def is_uploaded_media_file(file_name: str) -> bool:
+    normalized_name = file_name.replace("\\", "/")
+    extension = os.path.splitext(normalized_name)[1].lower()
+    return extension in MEDIA_EXTENSIONS and not normalized_name.endswith("/")
+
+
+def safe_media_filename(file_name: str) -> str:
+    filename = os.path.basename(file_name.replace("\\", "/"))
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", filename)
+
+
+def save_uploaded_media_files(uploaded_files, participant_id: str) -> int:
+    save_dir = f"data/strava_pictures/{participant_id}/"
+    os.makedirs(save_dir, exist_ok=True)
+
+    saved_count = 0
+    for uploaded_file in uploaded_files:
+        if not is_uploaded_media_file(uploaded_file.name):
+            continue
+
+        output_filename = safe_media_filename(uploaded_file.name)
+        if not output_filename:
+            continue
+
+        output_path = os.path.join(save_dir, output_filename)
+        with open(output_path, "wb") as output_file:
+            output_file.write(uploaded_file.getbuffer())
+        saved_count += 1
+
+    return saved_count
+
+
+def parse_strava_export_files(uploaded_files) -> tuple[pd.DataFrame, int, str]:
+    activities_file = find_activities_file(uploaded_files)
+    if activities_file is None:
+        render_missing_activities_message(uploaded_files)
+        return pd.DataFrame(), 0, ""
+
+    activities_file.seek(0)
+    df = parse_strava_csv(activities_file, filename=activities_file.name)
+    participant_id = st.session_state.get("participant_id", "unknown_participant")
+    media_count = save_uploaded_media_files(uploaded_files, participant_id)
+    return df, media_count, activities_file.name
 
 
 def render_strava_kpis(df: pd.DataFrame) -> None:
@@ -324,72 +409,63 @@ def render_strava_charts(df: pd.DataFrame) -> None:
         render_hr_zone_distribution(df)
 
 
-def render_workout_photo_uploader() -> None:
-    st.divider()
-    st.subheader("Upload Workout Photos")
-    uploaded_images = st.file_uploader(
-        "Upload pictures from your workouts for manual analysis",
-        type=["png", "jpg", "jpeg"],
-        accept_multiple_files=True,
-    )
-    if not uploaded_images:
-        return
-
-    p_id = st.session_state.get("participant_id", "unknown_participant")
-    save_dir = f"data/strava_pictures/{p_id}/"
-    os.makedirs(save_dir, exist_ok=True)
-
-    for uploaded_image in uploaded_images:
-        safe_filename = re.sub(r"[^A-Za-z0-9_.-]+", "_", uploaded_image.name)
-        file_path = os.path.join(save_dir, safe_filename)
-        with open(file_path, "wb") as output_file:
-            output_file.write(uploaded_image.getbuffer())
-
-    st.success(f"Pictures saved securely for Participant ID: {p_id}. Ready for OneDrive sync.")
-
-
 def render_strava_feature() -> None:
     inject_strava_css()
     st.markdown(
         """
         <section class="strava-hero">
-            <h1>Upload Strava Activities</h1>
-            <p>Use the activities.csv file from your Strava export. Header variations are detected automatically.</p>
+            <h1>Upload Strava Export</h1>
+            <p>Drop the unzipped Strava export files here. We will extract your activity data and workout media automatically.</p>
         </section>
         """,
         unsafe_allow_html=True,
     )
 
-    uploaded_files = st.file_uploader("Strava CSV files", type=["csv"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader(
+        "Drop all files from your Strava Export",
+        type=UPLOAD_FILE_TYPES,
+        accept_multiple_files="directory",
+    )
+    st.caption(
+        "Upload the unzipped Strava export folder or select all relevant files at once. "
+        "Make sure `activities.csv` and the workout media files are included."
+    )
 
     if not uploaded_files:
-        st.info("Upload one or more Strava CSV files to continue.")
+        st.info("Drop the unzipped Strava export files to continue.")
         return
 
-    df = parse_strava_csv(uploaded_files)
+    df, media_count, source_file = parse_strava_export_files(uploaded_files)
     if df.empty:
         st.warning("No valid Strava workouts were found after parsing dates and elapsed time.")
         return
 
     logged_files = st.session_state.setdefault("logged_strava_files", set())
     participant_id = st.session_state.get("participant_id")
-    for uploaded_file in uploaded_files:
-        if participant_id and uploaded_file.name not in logged_files:
-            log_strava_upload(participant_id, uploaded_file.name)
-            logged_files.add(uploaded_file.name)
+    upload_key = "|".join(sorted(uploaded_file.name for uploaded_file in uploaded_files))
+    if participant_id and upload_key not in logged_files:
+        log_strava_upload(participant_id, source_file or "unzipped_strava_export")
+        logged_files.add(upload_key)
 
     if participant_id:
-        source_file = "|".join(uploaded_file.name for uploaded_file in uploaded_files)
-        save_strava_activities(participant_id, df, source_file=source_file)
+        save_strava_activities(participant_id, df, source_file=source_file or "unzipped_strava_export")
 
     st.session_state.strava_uploaded = True
     st.session_state.strava_df = df
 
+    st.success(f"Strava export processed. Saved {media_count:,} workout media file(s) for this participant.")
     render_strava_kpis(df)
     render_strava_charts(df)
-    render_workout_photo_uploader()
 
     st.divider()
     if st.button("Next: View Combined Insights", type="primary", use_container_width=True):
-        st.session_state.current_page = "Combined Insights"
-        st.rerun()
+        with st.spinner("Processing data..."):
+            st.info(
+                "Combining Spotify and Strava data automatically. "
+                "This may take a couple of minutes, please wait patiently..."
+            )
+            st.session_state.current_page = "Combined Insights"
+            # Give Streamlit a brief moment to render the expectation-setting state
+            # before the next page starts BPM enrichment and workout matching.
+            time.sleep(2)
+            st.rerun()

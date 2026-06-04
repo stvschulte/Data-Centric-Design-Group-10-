@@ -342,6 +342,7 @@ def parse_spotify_json(uploaded_files) -> pd.DataFrame:
     rows = []
     for uploaded_file in uploaded_files:
         try:
+            uploaded_file.seek(0)
             payload = json.load(uploaded_file)
         except Exception as exc:
             st.error(f"Could not read `{uploaded_file.name}` as JSON: {exc}")
@@ -389,7 +390,7 @@ def parse_spotify_json(uploaded_files) -> pd.DataFrame:
         st.caption(f"Detected columns: {', '.join(raw_df.columns.astype(str).tolist())}")
         return pd.DataFrame(columns=REQUIRED_SPOTIFY_COLUMNS)
 
-    df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+    df["ts"] = pd.to_datetime(df["ts"], errors="coerce", utc=True)
     if getattr(df["ts"].dt, "tz", None) is not None:
         df["ts"] = df["ts"].dt.tz_convert(None)
 
@@ -464,7 +465,17 @@ def get_spotify_client(client_id: str, client_secret: str):
         return None, "missing_spotipy"
 
     auth_manager = SpotifyClientCredentials(client_id=client_id, client_secret=client_secret)
-    return spotipy.Spotify(auth_manager=auth_manager, requests_timeout=5, retries=2), "ready"
+    # Keep optional artwork lookups non-blocking. Spotipy's default retry behavior can
+    # wait for very long Retry-After windows when Spotify rate-limits the app.
+    return (
+        spotipy.Spotify(
+            auth_manager=auth_manager,
+            requests_timeout=4,
+            retries=0,
+            status_retries=0,
+        ),
+        "ready",
+    )
 
 
 def get_artwork_cache() -> dict:
@@ -584,15 +595,29 @@ def lookup_track_artwork(spotify_client, track_name: str, artist_name: str) -> d
     return artwork
 
 
-def add_spotify_artwork_columns(artist_totals: pd.DataFrame, track_totals: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+def add_spotify_artwork_columns(
+    artist_totals: pd.DataFrame,
+    track_totals: pd.DataFrame,
+    load_external_artwork: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    artists = artist_totals.copy()
+    tracks = track_totals.copy()
+
+    if not load_external_artwork:
+        artists["image_url"] = [
+            artist_placeholder_url(str(row["master_metadata_album_artist_name"]))
+            for _, row in artists.iterrows()
+        ]
+        artists["spotify_url"] = ""
+        tracks["image_url"] = track_placeholder_url()
+        tracks["spotify_url"] = ""
+        return artists, tracks, "skipped"
+
     client_id = get_spotify_secret("SPOTIPY_CLIENT_ID")
     client_secret = get_spotify_secret("SPOTIPY_CLIENT_SECRET")
     spotify_client, artwork_status = get_spotify_client(client_id, client_secret)
     if artwork_status != "ready":
         artwork_status = "deezer_fallback"
-
-    artists = artist_totals.copy()
-    tracks = track_totals.copy()
 
     artist_artwork = []
     for _, row in artists.iterrows():
@@ -619,7 +644,9 @@ def add_spotify_artwork_columns(artist_totals: pd.DataFrame, track_totals: pd.Da
 
 
 def render_artwork_status(artwork_status: str) -> None:
-    if artwork_status == "ready":
+    if artwork_status == "skipped":
+        st.caption("Afbeeldingen zijn overgeslagen zodat uploaden en doorgaan snel blijft. Zet de optie hieronder aan als je artwork wilt laden.")
+    elif artwork_status == "ready":
         st.caption("Spotify artwork is ingeschakeld via de Spotify Web API; top-tracks en top-artiesten worden opgezocht voor afbeeldingen.")
     elif artwork_status == "deezer_fallback":
         st.caption("Afbeeldingen worden zonder Spotify credentials opgehaald via de publieke Deezer Search API. Als een match ontbreekt, gebruikt de app alsnog een placeholder.")
@@ -675,7 +702,7 @@ def render_ranking_rows(df: pd.DataFrame, name_column: str, image_type: str) -> 
     return "\n".join(rows_html)
 
 
-def render_top_10_rankings(df: pd.DataFrame) -> None:
+def render_top_10_rankings(df: pd.DataFrame, load_external_artwork: bool = False) -> None:
     artist_totals = (
         df.groupby("master_metadata_album_artist_name", as_index=False)
         .agg(total_ms=("ms_played", "sum"), plays=("ms_played", "size"))
@@ -691,7 +718,11 @@ def render_top_10_rankings(df: pd.DataFrame) -> None:
         .sort_values("hours", ascending=False)
         .head(10)
     )
-    artist_totals, track_totals, artwork_status = add_spotify_artwork_columns(artist_totals, track_totals)
+    artist_totals, track_totals, artwork_status = add_spotify_artwork_columns(
+        artist_totals,
+        track_totals,
+        load_external_artwork=load_external_artwork,
+    )
 
     artist_rows = render_ranking_rows(
         artist_totals,
@@ -721,8 +752,8 @@ def render_top_10_rankings(df: pd.DataFrame) -> None:
     render_artwork_status(artwork_status)
 
 
-def render_spotify_charts(df: pd.DataFrame) -> None:
-    render_top_10_rankings(df)
+def render_spotify_charts(df: pd.DataFrame, load_external_artwork: bool = False) -> None:
+    render_top_10_rankings(df, load_external_artwork=load_external_artwork)
 
     hourly = df.assign(hour=df["ts"].dt.hour).groupby("hour", as_index=False).size()
     render_html('<div class="spotify-section-title">Listening Activity per Hour</div>')
@@ -820,9 +851,17 @@ def render_spotify_feature() -> None:
     st.session_state.spotify_df = df
 
     render_spotify_kpis(df)
-    render_spotify_charts(df)
 
     st.divider()
     if st.button("Next: Upload Strava Data", type="primary", use_container_width=True):
         st.session_state.current_page = "Strava Upload"
         st.rerun()
+
+    st.divider()
+    load_external_artwork = st.toggle(
+        "Load artist and album images",
+        value=False,
+        help="Optional. Leave this off during sessions: Spotify can rate-limit artwork lookups and slow the page down.",
+    )
+    with st.spinner("Rendering Spotify summary..."):
+        render_spotify_charts(df, load_external_artwork=load_external_artwork)

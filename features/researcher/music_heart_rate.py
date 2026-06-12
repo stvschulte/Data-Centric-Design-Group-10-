@@ -12,7 +12,6 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from scipy import stats
 
 from .styles import (
     get_plotly_layout,
@@ -21,6 +20,7 @@ from .styles import (
     COLORS,
 )
 from .data_loader import HR_ZONE_INFO
+from .stats_utils import add_ols_line, pearsonr
 
 
 # 用于分析的 5 个音乐特征
@@ -219,14 +219,12 @@ def _render_hr_music_scatter(df: pd.DataFrame):
             c for c in ["participant_id", "activity_type", "duration_min"] if c in df.columns
         ],
         opacity=0.65,
-        trendline="ols",
-        trendline_scope="overall",
-        trendline_color_override=COLORS["accent_primary"],
         labels={
             "avg_heart_rate": "Avg Heart Rate (bpm)",
             feature: FEATURE_LABELS.get(feature, feature),
         },
     )
+    add_ols_line(fig, df, "avg_heart_rate", feature, COLORS["accent_primary"])
     fig.update_layout(**get_plotly_layout(height=450))
     st.plotly_chart(fig, use_container_width=True)
 
@@ -235,7 +233,7 @@ def _render_hr_music_scatter(df: pd.DataFrame):
         try:
             valid = df[["avg_heart_rate", feature]].dropna()
             if len(valid) > 3:
-                r, p = stats.pearsonr(valid["avg_heart_rate"], valid[feature])
+                r, p = pearsonr(valid["avg_heart_rate"], valid[feature])
                 sig_emoji = "🟢" if p < 0.05 else "🟡" if p < 0.1 else "🔴"
 
                 c1, c2, c3 = st.columns(3)
@@ -260,7 +258,7 @@ def _render_auto_insights(df: pd.DataFrame):
             valid = df[["avg_heart_rate", feature]].dropna()
             if len(valid) > 10:
                 try:
-                    r, p = stats.pearsonr(valid["avg_heart_rate"], valid[feature])
+                    r, p = pearsonr(valid["avg_heart_rate"], valid[feature])
                     if p < 0.05 and abs(r) > 0.2:
                         direction = "increases" if r > 0 else "decreases"
                         insights.append(

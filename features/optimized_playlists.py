@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import html
 import textwrap
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 
 SPOTIFY_GREEN = "#1DB954"
-HEART_RATE_ZONE_IMAGE_URL = "https://www.polar.com/blog/wp-content/uploads/2019/05/Heart-rate-zones-1.jpg"
+HEART_RATE_ZONE_IMAGE_PATH = Path(__file__).resolve().parents[1] / "assets" / "heart_rate_zones.svg"
 ZONE_DEFINITIONS = [
     ("Zone 1", "Recovery", "< 110 BPM", 0, 110),
     ("Zone 2", "Endurance", "110-130 BPM", 110, 131),
@@ -98,6 +99,11 @@ def inject_playlist_css() -> None:
             color: #ffffff;
             font-weight: 850;
         }}
+        .track-source {{
+            color: #9ca3af;
+            font-size: 0.78rem;
+            font-weight: 650;
+        }}
         .empty-zone {{
             color: #cbd5e1;
             font-size: 0.92rem;
@@ -126,13 +132,32 @@ def build_track_summary(df: pd.DataFrame) -> pd.DataFrame:
     if usable.empty:
         return pd.DataFrame()
 
+    if "bpm_source" not in usable.columns:
+        usable["bpm_source"] = "Unknown"
     usable["playlist_zone"] = usable["track_bpm"].apply(zone_for_bpm)
     return (
         usable.groupby(["track_name", "artist_name", "playlist_zone"], as_index=False)
-        .agg(total_ms_played=("ms_played", "sum"), real_bpm=("track_bpm", "mean"))
+        .agg(
+            total_ms_played=("ms_played", "sum"),
+            real_bpm=("track_bpm", "mean"),
+            bpm_source=("bpm_source", lambda values: values.mode().iat[0] if not values.mode().empty else "Unknown"),
+        )
         .assign(total_minutes=lambda data: data["total_ms_played"] / 60000)
         .sort_values("total_ms_played", ascending=False)
     )
+
+
+def compact_bpm_source(source: str) -> str:
+    source = str(source or "Unknown")
+    if source.startswith("Spotify audio_features"):
+        return "Spotify audio_features"
+    if source.startswith("SongBPM"):
+        return "SongBPM"
+    if source.startswith("Deezer"):
+        return "Deezer"
+    if source.startswith("Genre-derived BPM"):
+        return "Genre-derived BPM"
+    return source
 
 
 def render_zone_card(zone_name: str, label: str, target_bpm: str, tracks: pd.DataFrame) -> None:
@@ -145,6 +170,7 @@ def render_zone_card(zone_name: str, label: str, target_bpm: str, tracks: pd.Dat
                 <div class="track-meta">
                     {html.escape(str(row["artist_name"]))}<br>
                     <span class="track-bpm">{row["real_bpm"]:.0f} BPM</span> · {row["total_minutes"]:.1f} min listened
+                    <br><span class="track-source">{html.escape(compact_bpm_source(row.get("bpm_source", "Unknown")))}</span>
                 </div>
             </div>
             """
@@ -174,7 +200,10 @@ def render_optimized_playlists() -> None:
         </section>
         """
     )
-    st.image(HEART_RATE_ZONE_IMAGE_URL, use_column_width=True)
+    if HEART_RATE_ZONE_IMAGE_PATH.exists():
+        st.image(str(HEART_RATE_ZONE_IMAGE_PATH), use_container_width=True)
+    else:
+        st.info("Heart rate zone reference image could not be loaded.")
 
     participant_id = st.session_state.get("participant_id")
     augmented_df = st.session_state.get("augmented_music_workout_df")

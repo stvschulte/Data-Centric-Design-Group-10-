@@ -13,7 +13,6 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from scipy import stats
 
 from .styles import (
     get_plotly_layout,
@@ -21,6 +20,7 @@ from .styles import (
     render_insight_card,
     COLORS,
 )
+from .stats_utils import add_ols_line, spearmanr
 
 
 def render(df: pd.DataFrame):
@@ -137,21 +137,19 @@ def _render_effort_hr_consistency(df: pd.DataFrame):
             color="activity_type",
             size="duration_min" if "duration_min" in valid.columns else None,
             opacity=0.7,
-            trendline="ols",
-            trendline_scope="overall",
-            trendline_color_override=COLORS["accent_primary"],
             labels={
                 "perceived_intensity": "Self-reported intensity (1-5)",
                 "avg_heart_rate": "Avg Heart Rate (bpm)",
             },
         )
+        add_ols_line(fig, valid, "perceived_intensity", "avg_heart_rate", COLORS["accent_primary"])
         fig.update_layout(**get_plotly_layout(height=400))
         st.plotly_chart(fig, use_container_width=True)
 
     with col_r:
         # 计算 Spearman 等级相关（适合 5 点 likert × 连续）
         try:
-            r, p = stats.spearmanr(valid["perceived_intensity"], valid["avg_heart_rate"])
+            r, p = spearmanr(valid["perceived_intensity"], valid["avg_heart_rate"])
             st.metric("Spearman ρ", f"{r:+.3f}")
             st.metric("p-value", f"{p:.4f}")
 

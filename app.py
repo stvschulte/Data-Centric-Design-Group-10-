@@ -20,18 +20,15 @@ PARTICIPANT_PAGES = {
 def render_researcher_dashboard_page() -> None:
     """Load the researcher dashboard only when it is opened.
 
-    Researcher analysis modules depend on scipy. Lazy loading keeps the
-    participant flow usable even when optional researcher dependencies are
-    missing from the local Python environment.
+    Lazy loading keeps the participant flow usable even when optional
+    researcher dependencies are missing from the local Python environment.
     """
     try:
         from features.researcher_dashboard import render_researcher_dashboard
     except ModuleNotFoundError as exc:
-        if exc.name == "scipy":
-            st.error("The researcher dashboard requires scipy, which is not installed in this environment.")
-            st.code("python3 -m pip install -r requirements.txt", language="bash")
-            return
-        raise
+        st.error(f"The researcher dashboard is missing a dependency: `{exc.name}`.")
+        st.code("python3 -m pip install -r requirements.txt", language="bash")
+        return
 
     render_researcher_dashboard()
 

@@ -19,6 +19,7 @@ from .styles import (
     render_insight_card,
     COLORS,
 )
+from .stats_utils import add_ols_line
 
 try:
     from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -304,15 +305,13 @@ def _render_fer_section(df: pd.DataFrame):
                 x="avg_heart_rate",
                 y="fer_fatigue_score",
                 color="activity_type",
-                trendline="ols",
-                trendline_scope="overall",
-                trendline_color_override=COLORS["accent_primary"],
                 opacity=0.7,
                 labels={
                     "avg_heart_rate": "Avg Heart Rate (bpm)",
                     "fer_fatigue_score": "FER Fatigue Score (0-10)",
                 },
             )
+            add_ols_line(fig, fer_df, "avg_heart_rate", "fer_fatigue_score", COLORS["accent_primary"])
             fig.update_layout(**get_plotly_layout(height=380))
             st.plotly_chart(fig, use_container_width=True)
         else:

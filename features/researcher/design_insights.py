@@ -12,7 +12,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from scipy import stats
 
 from .styles import (
     get_plotly_layout,
@@ -21,6 +20,7 @@ from .styles import (
     COLORS,
 )
 from .data_loader import HR_ZONE_INFO
+from .stats_utils import spearmanr
 
 
 def render(df: pd.DataFrame):
@@ -145,7 +145,7 @@ def _generate_design_principles(df: pd.DataFrame) -> list:
         valid = df.dropna(subset=["perceived_intensity", "avg_heart_rate"])
         if len(valid) > 10:
             try:
-                r, p = stats.spearmanr(
+                r, p = spearmanr(
                     valid["perceived_intensity"], valid["avg_heart_rate"]
                 )
                 if p < 0.05:

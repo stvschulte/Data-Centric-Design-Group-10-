@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 import re
@@ -39,37 +40,58 @@ HR_ZONE_BANDS = [
     (170, 220, "rgba(231, 76, 60, 0.15)", "Z5 Max | music 140-170"),
 ]
 GENRE_BPM_PRIORS = {
-    "afro house": 124,
-    "afrobeats": 105,
+    # Practical genre tempo priors based on published DJ/production BPM ranges.
+    # These are only used when a track-level BPM source is unavailable.
+    "afro house": 122,
+    "afrobeats": 115,
     "afrobeat": 115,
+    "afro pop": 108,
+    "afro fusion": 108,
     "amapiano": 113,
     "house": 124,
     "deep house": 122,
     "tech house": 126,
     "progressive house": 124,
     "melodic house": 123,
+    "electro house": 128,
+    "disco": 120,
     "dance": 124,
+    "dance pop": 122,
     "edm": 128,
-    "techno": 135,
+    "electronic": 124,
+    "electronica": 120,
+    "techno": 130,
+    "melodic techno": 124,
     "trance": 138,
     "drum and bass": 174,
+    "drum & bass": 174,
     "dnb": 174,
     "dubstep": 140,
     "garage": 130,
     "uk garage": 132,
-    "hip hop": 92,
-    "rap": 92,
+    "hip hop": 98,
+    "hip-hop": 98,
+    "rap": 98,
     "drill": 145,
     "trap": 140,
+    "lo fi": 82,
+    "lo-fi": 82,
     "r&b": 92,
+    "rnb": 92,
     "pop": 120,
     "rock": 120,
+    "alternative": 118,
+    "indie": 118,
     "metal": 130,
     "punk": 160,
     "reggaeton": 95,
     "latin": 100,
+    "salsa": 100,
+    "dancehall": 100,
     "funk": 105,
     "soul": 95,
+    "jazz": 110,
+    "classical": 90,
 }
 
 
@@ -175,7 +197,10 @@ def get_configured_spotify_credentials() -> tuple[str, str]:
 
 def spotify_credentials_status(client_id: str, client_secret: str) -> str:
     if client_id and client_secret:
-        return "Spotify credentials detected. Fetching BPM from Spotify's Web API."
+        return (
+            "Spotify credentials detected. The app uses Spotify metadata when available, "
+            "but BPM/audio_features may be blocked for Development Mode apps."
+        )
     return (
         "Spotify credentials are missing or still set to placeholder values. "
         "Update `.streamlit/secrets.toml` with real values and restart Streamlit."
@@ -323,6 +348,27 @@ def normalize_match_text(value: str) -> str:
     return re.sub(r"\s+", " ", value)
 
 
+def run_pair_lookups_in_parallel(
+    pairs: list[tuple[str, str]],
+    lookup_func,
+    max_workers: int = 8,
+) -> dict[tuple[str, str], object]:
+    if not pairs:
+        return {}
+
+    results = {}
+    worker_count = max(1, min(max_workers, len(pairs)))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_by_pair = {executor.submit(lookup_func, pair): pair for pair in pairs}
+        for future in as_completed(future_by_pair):
+            pair = future_by_pair[future]
+            try:
+                results[pair] = future.result()
+            except Exception:
+                results[pair] = None
+    return results
+
+
 def songbpm_slug(value: str) -> str:
     value = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii").lower()
     value = value.replace("&", " and ")
@@ -335,14 +381,36 @@ def match_genre_bpm_values(genres: list[str]) -> list[tuple[str, float]]:
     matches = []
     for genre in genres or []:
         normalized_genre = normalize_match_text(genre)
-        for genre_key, bpm in GENRE_BPM_PRIORS.items():
-            if genre_key in normalized_genre:
+        for genre_key, bpm in sorted(GENRE_BPM_PRIORS.items(), key=lambda item: len(item[0]), reverse=True):
+            if normalize_match_text(genre_key) in normalized_genre:
                 matches.append((genre_key, float(bpm)))
     return matches
 
 
+def normalize_genre_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, tuple):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except Exception:
+            pass
+        return [part.strip() for part in re.split(r"[,;/|]", stripped) if part.strip()]
+    return []
+
+
 def genre_derived_bpm(genres: list[str], max_genres: int = 3) -> tuple[float | None, str]:
-    matches = match_genre_bpm_values(genres)
+    clean_genres = normalize_genre_list(genres)
+    matches = match_genre_bpm_values(clean_genres)
     if not matches:
         return None, ""
 
@@ -358,7 +426,62 @@ def genre_derived_bpm(genres: list[str], max_genres: int = 3) -> tuple[float | N
 
     bpm_value = float(np.mean([bpm for _, bpm in deduped]))
     label = ", ".join(genre for genre, _ in deduped)
-    return bpm_value, f"Genre-derived BPM from Spotify artist genres: {label}"
+    source_label = ", ".join(clean_genres[:max_genres])
+    return bpm_value, f"Genre-derived BPM ({label}) from genre metadata: {source_label}"
+
+
+def best_match_score(left: str, right: str) -> float:
+    left_clean = normalize_match_text(left)
+    right_clean = normalize_match_text(right)
+    if not left_clean or not right_clean:
+        return 0.0
+    score = SequenceMatcher(None, left_clean, right_clean).ratio()
+    if left_clean in right_clean or right_clean in left_clean:
+        score = max(score, 0.92)
+    return score
+
+
+@st.cache_data(show_spinner=False)
+def fetch_itunes_track_genres(track_name: str, artist_name: str) -> tuple[list[str], str]:
+    """Fetch track genre metadata from the public iTunes Search API.
+
+    This gives us a non-Spotify genre source when Spotify search is rate-limited
+    and audio_features are unavailable. The returned genre is still metadata,
+    not a guessed BPM from the title.
+    """
+    clean_track = str(track_name or "").strip()
+    clean_artist = str(artist_name or "").strip()
+    if not clean_track:
+        return [], ""
+
+    query = f"{clean_track} {clean_artist}".strip()
+    try:
+        url = f"https://itunes.apple.com/search?term={quote_plus(query)}&entity=song&limit=5"
+        request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(request, timeout=3) as response:
+            payload = json.load(response)
+    except Exception:
+        return [], ""
+
+    best_item = None
+    best_score = 0.0
+    for item in payload.get("results", []):
+        track_score = best_match_score(clean_track, item.get("trackName", ""))
+        artist_score = best_match_score(clean_artist, item.get("artistName", "")) if clean_artist else 0.9
+        score = (track_score * 0.68) + (artist_score * 0.32)
+        if score > best_score:
+            best_score = score
+            best_item = item
+
+    if not best_item or best_score < 0.72:
+        return [], ""
+
+    genres = []
+    primary_genre = str(best_item.get("primaryGenreName") or "").strip()
+    if primary_genre:
+        genres.append(primary_genre)
+
+    return genres, f"iTunes genre metadata: {primary_genre}" if genres else ""
 
 
 def song_title_variants(track_name: str) -> list[str]:
@@ -382,7 +505,7 @@ def song_title_variants(track_name: str) -> list[str]:
 @st.cache_data(show_spinner=False)
 def fetch_songbpm_html(url: str) -> str:
     request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urlopen(request, timeout=5) as response:
+    with urlopen(request, timeout=3) as response:
         return response.read().decode("utf-8", errors="ignore")
 
 
@@ -509,11 +632,16 @@ def fill_missing_tempos_from_songbpm(df: pd.DataFrame) -> tuple[pd.DataFrame, st
         return enriched, ""
 
     pairs_df = enriched.loc[missing_mask, ["track_name", "artist_name"]].drop_duplicates()
+    pairs = [(str(row.track_name), str(row.artist_name)) for row in pairs_df.itertuples(index=False)]
+
+    def lookup(pair: tuple[str, str]) -> tuple[float | None, str]:
+        return fetch_songbpm_bpm(pair[0], pair[1])
+
+    lookup_results = run_pair_lookups_in_parallel(pairs, lookup)
     bpm_by_pair = {}
     source_by_pair = {}
-    for row in pairs_df.itertuples(index=False):
-        pair_key = (str(row.track_name), str(row.artist_name))
-        bpm, source = fetch_songbpm_bpm(pair_key[0], pair_key[1])
+    for pair_key, result in lookup_results.items():
+        bpm, source = result if result else (None, "")
         bpm_by_pair[pair_key] = bpm
         source_by_pair[pair_key] = source
 
@@ -552,7 +680,7 @@ def fetch_deezer_bpm(track_name: str, artist_name: str) -> float | None:
         try:
             search_url = f"https://api.deezer.com/search/track?q={quote_plus(query)}&limit=1"
             request = Request(search_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urlopen(request, timeout=5) as response:
+            with urlopen(request, timeout=3) as response:
                 payload = json.load(response)
 
             items = payload.get("data", [])
@@ -564,7 +692,7 @@ def fetch_deezer_bpm(track_name: str, artist_name: str) -> float | None:
                 continue
 
             detail_request = Request(f"https://api.deezer.com/track/{track_id}", headers={"User-Agent": "Mozilla/5.0"})
-            with urlopen(detail_request, timeout=5) as response:
+            with urlopen(detail_request, timeout=3) as response:
                 detail = json.load(response)
 
             bpm = float(detail.get("bpm") or 0)
@@ -586,12 +714,12 @@ def fill_missing_tempos_from_deezer(df: pd.DataFrame) -> tuple[pd.DataFrame, str
         return enriched, ""
 
     pairs_df = enriched.loc[missing_mask, ["track_name", "artist_name"]].drop_duplicates()
-    bpm_by_pair = {}
-    for row in pairs_df.itertuples(index=False):
-        bpm_by_pair[(str(row.track_name), str(row.artist_name))] = fetch_deezer_bpm(
-            str(row.track_name),
-            str(row.artist_name),
-        )
+    pairs = [(str(row.track_name), str(row.artist_name)) for row in pairs_df.itertuples(index=False)]
+
+    def lookup(pair: tuple[str, str]) -> float | None:
+        return fetch_deezer_bpm(pair[0], pair[1])
+
+    bpm_by_pair = run_pair_lookups_in_parallel(pairs, lookup)
 
     for idx, row in enriched.loc[missing_mask].iterrows():
         bpm = bpm_by_pair.get((str(row["track_name"]), str(row["artist_name"])))
@@ -685,6 +813,8 @@ def add_spotify_metadata(df: pd.DataFrame, client_id: str, client_secret: str) -
     enriched["spotify_artist_genres"] = enriched["spotify_track_uri"].map(
         lambda uri: metadata_by_uri.get(uri, {}).get("spotify_artist_genres", [])
     )
+    enriched["genre_labels"] = enriched["spotify_artist_genres"].apply(normalize_genre_list)
+    enriched["genre_source"] = enriched["genre_labels"].apply(lambda genres: "Spotify artist genres" if genres else "")
     enriched["spotify_popularity"] = pd.to_numeric(enriched["spotify_popularity"], errors="coerce")
     enriched["spotify_duration_minutes"] = pd.to_numeric(enriched["spotify_duration_ms"], errors="coerce") / 60000
     enriched["spotify_release_year"] = pd.to_numeric(enriched["spotify_release_year"], errors="coerce")
@@ -696,26 +826,75 @@ def add_spotify_metadata(df: pd.DataFrame, client_id: str, client_secret: str) -
     return enriched, "No Spotify metadata could be fetched."
 
 
+def fill_missing_genres_from_itunes(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    enriched = df.copy()
+    if "genre_labels" not in enriched.columns:
+        enriched["genre_labels"] = [[] for _ in range(len(enriched))]
+    if "genre_source" not in enriched.columns:
+        enriched["genre_source"] = ""
+
+    missing_genre_mask = (
+        enriched["genre_labels"].apply(lambda value: len(normalize_genre_list(value)) == 0)
+        & enriched["tempo"].isna()
+    )
+    if not missing_genre_mask.any():
+        return enriched, ""
+
+    pairs_df = enriched.loc[missing_genre_mask, ["track_name", "artist_name"]].drop_duplicates()
+    pairs = [(str(row.track_name), str(row.artist_name)) for row in pairs_df.itertuples(index=False)]
+
+    def lookup(pair: tuple[str, str]) -> tuple[list[str], str]:
+        return fetch_itunes_track_genres(pair[0], pair[1])
+
+    lookup_results = run_pair_lookups_in_parallel(pairs, lookup)
+    genres_by_pair = {}
+    source_by_pair = {}
+    for pair_key, result in lookup_results.items():
+        genres, source = result if result else ([], "")
+        genres_by_pair[pair_key] = genres
+        source_by_pair[pair_key] = source
+
+    filled_pairs = set()
+    for idx, row in enriched.loc[missing_genre_mask].iterrows():
+        pair_key = (str(row["track_name"]), str(row["artist_name"]))
+        genres = genres_by_pair.get(pair_key, [])
+        if genres:
+            enriched.at[idx, "genre_labels"] = genres
+            enriched.at[idx, "genre_source"] = source_by_pair.get(pair_key, "iTunes genre metadata")
+            filled_pairs.add(pair_key)
+
+    if filled_pairs:
+        return enriched, f"iTunes/Apple genre metadata found genres for {len(filled_pairs):,} unique matched track(s)."
+    return enriched, "iTunes/Apple genre metadata did not find usable genres for the remaining matched tracks."
+
+
 def fill_missing_tempos_from_genres(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     enriched = df.copy()
     if "bpm_source" not in enriched.columns:
         enriched["bpm_source"] = ""
+    if "genre_labels" not in enriched.columns:
+        enriched["genre_labels"] = [[] for _ in range(len(enriched))]
 
     missing_mask = enriched["tempo"].isna()
-    if not missing_mask.any() or "spotify_artist_genres" not in enriched.columns:
+    if not missing_mask.any():
         return enriched, ""
 
     filled_pairs = set()
     for idx, row in enriched.loc[missing_mask].iterrows():
-        bpm, source = genre_derived_bpm(row.get("spotify_artist_genres", []))
+        genre_labels = normalize_genre_list(row.get("genre_labels", []))
+        if not genre_labels:
+            genre_labels = normalize_genre_list(row.get("spotify_artist_genres", []))
+
+        bpm, source = genre_derived_bpm(genre_labels)
         if bpm:
             enriched.at[idx, "tempo"] = bpm
-            enriched.at[idx, "bpm_source"] = source
+            genre_source = str(row.get("genre_source") or "genre metadata")
+            enriched.at[idx, "bpm_source"] = f"{source} [{genre_source}]"
             filled_pairs.add((str(row.get("track_name")), str(row.get("artist_name"))))
 
     if filled_pairs:
         return enriched, f"Genre-derived fallback assigned BPM for {len(filled_pairs):,} unique matched track(s)."
-    return enriched, "Genre-derived fallback did not match Spotify artist genres to known BPM priors."
+    return enriched, "Genre-derived fallback did not match available genre metadata to known BPM priors."
 
 
 @st.cache_data(show_spinner=False)
@@ -799,7 +978,12 @@ def fill_missing_spotify_uris(df: pd.DataFrame, client_id: str, client_secret: s
 def add_track_tempos(track_df: pd.DataFrame, client_id: str, client_secret: str) -> tuple[pd.DataFrame, str]:
     df = track_df.copy()
     df["spotify_track_uri"] = df["spotify_track_uri"].fillna("").astype(str)
-    df, uri_status = fill_missing_spotify_uris(df, client_id, client_secret)
+    has_exported_uris = df["spotify_track_uri"].str.strip().ne("").any()
+    uri_status = (
+        "Using Spotify track URIs from the uploaded listening history."
+        if has_exported_uris
+        else "Spotify URI search skipped to avoid rate-limit blocking; no Spotify URIs were present in the upload."
+    )
     df, metadata_status = add_spotify_metadata(df, client_id, client_secret)
     unique_uris = tuple(sorted(uri for uri in df["spotify_track_uri"].unique() if uri))
 
@@ -810,13 +994,14 @@ def add_track_tempos(track_df: pd.DataFrame, client_id: str, client_secret: str)
     df.loc[df["tempo"].notna(), "bpm_source"] = "Spotify audio_features"
     df, songbpm_status = fill_missing_tempos_from_songbpm(df)
     df, deezer_status = fill_missing_tempos_from_deezer(df)
+    df, itunes_genre_status = fill_missing_genres_from_itunes(df)
     df, genre_status = fill_missing_tempos_from_genres(df)
     df["track_bpm"] = df["tempo"]
     df["standard_hr"] = pd.to_numeric(df["standard_hr"], errors="coerce")
 
     status_parts = [
         status
-        for status in [uri_status, metadata_status, songbpm_status, deezer_status, genre_status]
+        for status in [uri_status, metadata_status, songbpm_status, deezer_status, itunes_genre_status, genre_status]
         if status
     ]
     if tempo_by_uri:
@@ -860,6 +1045,19 @@ def pearson_insight(
     )
 
 
+def compact_bpm_source(source: str) -> str:
+    source = str(source or "Unknown")
+    if source.startswith("Spotify audio_features"):
+        return "Spotify audio_features"
+    if source.startswith("SongBPM"):
+        return "SongBPM"
+    if source.startswith("Deezer"):
+        return "Deezer"
+    if source.startswith("Genre-derived BPM"):
+        return "Genre-derived BPM"
+    return source
+
+
 def tempo_axis_range(track_df: pd.DataFrame) -> list[float]:
     tempo = pd.to_numeric(track_df["tempo"], errors="coerce").dropna()
     if tempo.empty:
@@ -888,6 +1086,9 @@ def add_ols_trendline(fig: go.Figure, track_df: pd.DataFrame, x_column: str) -> 
 
 
 def render_track_level_scatter(track_df: pd.DataFrame) -> None:
+    plot_df = track_df.copy()
+    plot_df["bpm_source_display"] = plot_df["bpm_source"].apply(compact_bpm_source)
+
     fig = go.Figure()
     for y0, y1, fillcolor, annotation_text in HR_ZONE_BANDS:
         fig.add_hrect(
@@ -904,8 +1105,8 @@ def render_track_level_scatter(track_df: pd.DataFrame) -> None:
 
     fig.add_trace(
         go.Scatter(
-            x=track_df["tempo"],
-            y=track_df["standard_hr"],
+            x=plot_df["tempo"],
+            y=plot_df["standard_hr"],
             mode="markers",
             name="Workout tracks",
             marker=dict(
@@ -914,7 +1115,7 @@ def render_track_level_scatter(track_df: pd.DataFrame) -> None:
                 opacity=0.7,
                 line=dict(color="rgba(255,255,255,0.28)", width=1),
             ),
-            customdata=track_df[["track_name", "artist_name", "tempo", "workout_name", "bpm_source"]],
+            customdata=plot_df[["track_name", "artist_name", "tempo", "workout_name", "bpm_source_display"]],
             hovertemplate=(
                 "<b>%{customdata[0]}</b><br>"
                 "%{customdata[1]}<br>"
@@ -926,7 +1127,7 @@ def render_track_level_scatter(track_df: pd.DataFrame) -> None:
             ),
         )
     )
-    add_ols_trendline(fig, track_df, "tempo")
+    add_ols_trendline(fig, plot_df, "tempo")
 
     fig.update_layout(
         template="plotly_dark",
@@ -941,7 +1142,7 @@ def render_track_level_scatter(track_df: pd.DataFrame) -> None:
     )
     fig.update_xaxes(
         title="Track BPM",
-        range=tempo_axis_range(track_df),
+        range=tempo_axis_range(plot_df),
         showgrid=True,
         gridcolor="rgba(255,255,255,0.10)",
     )
@@ -1119,11 +1320,15 @@ def render_combined_insights() -> None:
     col_workouts.metric("Workouts With Music", f"{enriched_df['workout_name'].nunique():,}")
     if len(bpm_df) >= 3:
         col_bpm.metric("Tracks With BPM", f"{len(bpm_df):,}")
-        source_counts = bpm_df["bpm_source"].fillna("Unknown").value_counts().to_dict()
+        source_counts = bpm_df["bpm_source"].fillna("Unknown").apply(compact_bpm_source).value_counts().to_dict()
         st.caption(
             "BPM sources used: "
             + "; ".join(f"{source}: {count}" for source, count in list(source_counts.items())[:6])
         )
+        if source_counts.get("Genre-derived BPM"):
+            st.caption(
+                "Genre-derived BPM uses metadata genres first, then averages up to three matching genre tempo priors for that track."
+            )
         render_track_level_scatter(bpm_df)
         correlation, insight_text = pearson_insight(bpm_df)
     else:

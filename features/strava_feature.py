@@ -28,16 +28,49 @@ HR_ZONE_BACKGROUNDS = [
 ]
 
 COLUMN_VARIANTS = {
-    "standard_date": ["Activity Date", "activity date", "Date", "start_time"],
-    "standard_duration": ["Elapsed Time", "elapsed time", "Duration", "Time", "Moving Time"],
-    "standard_name": ["Activity Name", "activity name", "Name", "Title"],
-    "standard_type": ["Activity Type", "activity type", "Type"],
-    "standard_hr": ["Average Heart Rate", "average heart rate", "Heart Rate"],
+    "standard_date": ["Activity Date", "activity date", "Date", "start_time", "Datum van activiteit"],
+    "standard_duration": [
+        "Elapsed Time",
+        "elapsed time",
+        "Duration",
+        "Time",
+        "Moving Time",
+        "Verstreken tijd",
+        "Beweegtijd",
+    ],
+    "standard_name": ["Activity Name", "activity name", "Name", "Title", "Naam activiteit"],
+    "standard_type": ["Activity Type", "activity type", "Activiteitstype", "Type"],
+    "standard_hr": ["Average Heart Rate", "average heart rate", "Gemiddelde hartslag", "Heart Rate"],
     "Media": ["Media", "media"],
 }
 REQUIRED_STANDARD_COLUMNS = ["standard_date", "standard_duration", "standard_type"]
 MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif"}
 UPLOAD_FILE_TYPES = ["csv", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif"]
+DUTCH_MONTH_TRANSLATIONS = {
+    "januari": "January",
+    "jan": "Jan",
+    "februari": "February",
+    "feb": "Feb",
+    "maart": "March",
+    "mrt": "Mar",
+    "april": "April",
+    "apr": "Apr",
+    "mei": "May",
+    "juni": "June",
+    "jun": "Jun",
+    "juli": "July",
+    "jul": "Jul",
+    "augustus": "August",
+    "aug": "Aug",
+    "september": "September",
+    "sep": "Sep",
+    "oktober": "October",
+    "okt": "Oct",
+    "november": "November",
+    "nov": "Nov",
+    "december": "December",
+    "dec": "Dec",
+}
 
 
 def inject_strava_css() -> None:
@@ -125,6 +158,28 @@ def build_strava_column_mapping(columns: pd.Index) -> dict[str, str]:
     return mapping
 
 
+def infer_strava_csv_delimiter(csv_file) -> str | None:
+    """Choose the delimiter from the header row before falling back to pandas sniffing."""
+    position = csv_file.tell()
+    sample = csv_file.read(8192)
+    csv_file.seek(position)
+
+    if isinstance(sample, bytes):
+        sample_text = sample.decode("utf-8-sig", errors="replace")
+    else:
+        sample_text = str(sample)
+
+    header = sample_text.splitlines()[0] if sample_text else ""
+    semicolon_count = header.count(";")
+    comma_count = header.count(",")
+
+    if semicolon_count > comma_count:
+        return ";"
+    if comma_count > semicolon_count:
+        return ","
+    return None
+
+
 def parse_duration_to_seconds(duration_series: pd.Series) -> pd.Series:
     """Convert numeric seconds or HH:MM:SS-style duration values to seconds."""
     numeric_duration = pd.to_numeric(duration_series, errors="coerce")
@@ -135,10 +190,35 @@ def parse_duration_to_seconds(duration_series: pd.Series) -> pd.Series:
     return numeric_duration
 
 
+def normalize_strava_date_text(value) -> object:
+    """Translate Dutch month names so pandas can parse localized Strava exports."""
+    if pd.isna(value):
+        return value
+
+    date_text = str(value).strip()
+    for dutch_month, english_month in DUTCH_MONTH_TRANSLATIONS.items():
+        date_text = re.sub(rf"\b{re.escape(dutch_month)}\b", english_month, date_text, flags=re.IGNORECASE)
+    return date_text
+
+
+def parse_strava_dates(date_series: pd.Series) -> pd.Series:
+    normalized_dates = date_series.map(normalize_strava_date_text)
+    parsed_dates = normalized_dates.map(lambda value: pd.to_datetime(value, errors="coerce", dayfirst=True))
+
+    missing_dates = parsed_dates.isna() & normalized_dates.notna()
+    if missing_dates.any():
+        parsed_dates.loc[missing_dates] = normalized_dates[missing_dates].map(
+            lambda value: pd.to_datetime(value, errors="coerce", dayfirst=False)
+        )
+
+    return parsed_dates
+
+
 def parse_strava_csv(csv_file, filename: str = "activities.csv") -> pd.DataFrame:
     try:
+        delimiter = infer_strava_csv_delimiter(csv_file)
         # Strava CSVs can be comma- or semicolon-delimited depending on export locale.
-        raw_df = pd.read_csv(csv_file, sep=None, engine="python")
+        raw_df = pd.read_csv(csv_file, sep=delimiter) if delimiter else pd.read_csv(csv_file, sep=None, engine="python")
     except Exception as exc:
         st.error(f"Could not read `{filename}` as CSV: {exc}")
         return pd.DataFrame()
@@ -165,7 +245,7 @@ def parse_strava_csv(csv_file, filename: str = "activities.csv") -> pd.DataFrame
     if "Media" not in df.columns:
         df["Media"] = ""
 
-    df["standard_date"] = pd.to_datetime(df["standard_date"], errors="coerce")
+    df["standard_date"] = parse_strava_dates(df["standard_date"])
     if getattr(df["standard_date"].dt, "tz", None) is not None:
         df["standard_date"] = df["standard_date"].dt.tz_convert(None)
 

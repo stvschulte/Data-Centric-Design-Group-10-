@@ -18,19 +18,19 @@ PARTICIPANT_PAGES = {
 
 
 def render_researcher_dashboard_page() -> None:
-    """Load the researcher dashboard only when it is opened.
+    """Load the researcher area only when it is opened.
 
     Lazy loading keeps the participant flow usable even when optional
     researcher dependencies are missing from the local Python environment.
     """
     try:
-        from features.researcher_dashboard import render_researcher_dashboard
+        from features.researcher_area import render_researcher_area
     except ModuleNotFoundError as exc:
-        st.error(f"The researcher dashboard is missing a dependency: `{exc.name}`.")
+        st.error(f"The researcher area is missing a dependency: `{exc.name}`.")
         st.code("python3 -m pip install -r requirements.txt", language="bash")
         return
 
-    render_researcher_dashboard()
+    render_researcher_area()
 
 
 RESEARCHER_PAGES = {

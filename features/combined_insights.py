@@ -295,6 +295,7 @@ def merge_tracks_into_workouts(spotify_df: pd.DataFrame, strava_df: pd.DataFrame
                     "workout_start": workout["start_time"],
                     "track_time": track["ts"],
                     "standard_hr": workout["standard_hr"],
+                    "standard_duration": workout["standard_duration"],
                     "ms_played": track.get("ms_played", 0),
                 }
             )

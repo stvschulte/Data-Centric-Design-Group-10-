@@ -208,7 +208,7 @@ def render_participant_block(p_id: str, index: int) -> None:
         metric_cols = st.columns(3)
         metric_cols[0].metric("Spotify Rows", f"{len(spotify_saved):,}")
         metric_cols[1].metric("Strava Activities", f"{len(strava_saved):,}")
-        metric_cols[2].metric("Avg HR Rows", f"{strava_saved['standard_hr'].notna().sum():,}" if not strava_saved.empty else "0")
+        metric_cols[2].metric("Avg HR Rows", f"{strava_saved.get('standard_hr', pd.Series(dtype=float)).notna().sum():,}" if not strava_saved.empty else "0")
 
 
 def normalize_participant_scope(participant_ids: list[str]) -> list[str]:
@@ -244,9 +244,11 @@ def build_cohort_dataset(participant_ids: list[str]) -> tuple[pd.DataFrame, str]
     cohort_df = pd.concat(matched_parts, ignore_index=True)
     client_id, client_secret = get_configured_spotify_credentials()
     enriched_df, bpm_status = add_track_tempos(cohort_df, client_id, client_secret)
-    enriched_df["standard_duration"] = pd.to_numeric(enriched_df["standard_duration"], errors="coerce")
-    enriched_df["standard_hr"] = pd.to_numeric(enriched_df["standard_hr"], errors="coerce")
-    enriched_df["tempo"] = pd.to_numeric(enriched_df["tempo"], errors="coerce")
+
+    for col in ["standard_duration", "standard_hr", "tempo"]:
+        if col not in enriched_df.columns:
+            enriched_df[col] = pd.NA
+        enriched_df[col] = pd.to_numeric(enriched_df[col], errors="coerce")
 
     scope_status = f"Analysis scoped to current participant blocks: {', '.join(participant_ids)}."
     if skipped_participants:

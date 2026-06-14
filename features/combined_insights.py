@@ -978,6 +978,8 @@ def fill_missing_spotify_uris(df: pd.DataFrame, client_id: str, client_secret: s
 
 def add_track_tempos(track_df: pd.DataFrame, client_id: str, client_secret: str) -> tuple[pd.DataFrame, str]:
     df = track_df.copy()
+    if "spotify_track_uri" not in df.columns:
+        df["spotify_track_uri"] = ""
     df["spotify_track_uri"] = df["spotify_track_uri"].fillna("").astype(str)
     has_exported_uris = df["spotify_track_uri"].str.strip().ne("").any()
     uri_status = (
@@ -998,7 +1000,8 @@ def add_track_tempos(track_df: pd.DataFrame, client_id: str, client_secret: str)
     df, itunes_genre_status = fill_missing_genres_from_itunes(df)
     df, genre_status = fill_missing_tempos_from_genres(df)
     df["track_bpm"] = df["tempo"]
-    df["standard_hr"] = pd.to_numeric(df["standard_hr"], errors="coerce")
+    if "standard_hr" in df.columns:
+        df["standard_hr"] = pd.to_numeric(df["standard_hr"], errors="coerce")
 
     status_parts = [
         status

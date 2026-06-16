@@ -226,6 +226,10 @@ def to_utc_naive(series: pd.Series) -> pd.Series:
 
 def prepare_valid_workout_windows(strava_df: pd.DataFrame) -> pd.DataFrame:
     strava = strava_df.copy()
+    for column in ["standard_date", "standard_duration", "standard_hr", "standard_name", "standard_type"]:
+        if column not in strava.columns:
+            strava[column] = pd.NA
+
     strava["start_time"] = to_utc_naive(strava["standard_date"])
     strava["standard_duration"] = pd.to_numeric(strava["standard_duration"], errors="coerce")
     strava["standard_hr"] = pd.to_numeric(strava["standard_hr"], errors="coerce")
@@ -249,8 +253,14 @@ def workout_calendar_dates(workouts: pd.DataFrame) -> set:
 
 def prepare_spotify_tracks(spotify_df: pd.DataFrame, workouts: pd.DataFrame) -> pd.DataFrame:
     spotify = spotify_df.copy()
+    for column in ["ts", "track_name", "artist_name", "spotify_track_uri"]:
+        if column not in spotify.columns:
+            spotify[column] = pd.NA
+
     spotify["ts"] = to_utc_naive(spotify["ts"])
-    spotify["spotify_track_uri"] = spotify["spotify_track_uri"].apply(normalize_spotify_uri)
+    spotify["track_name"] = spotify["track_name"].fillna("Unknown Track").replace("", "Unknown Track")
+    spotify["artist_name"] = spotify["artist_name"].fillna("Unknown Artist").replace("", "Unknown Artist")
+    spotify["spotify_track_uri"] = spotify["spotify_track_uri"].fillna("").apply(normalize_spotify_uri)
     spotify = spotify.dropna(subset=["ts", "track_name"]).copy()
 
     # Performance optimization: keep only Spotify rows from days where a workout

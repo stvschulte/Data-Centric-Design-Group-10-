@@ -29,6 +29,38 @@ from utils.db_handler import (
 )
 
 
+COHORT_DEFAULT_COLUMNS = {
+    "participant_id": "Unknown",
+    "track_name": "Unknown Track",
+    "artist_name": "Unknown Artist",
+    "spotify_track_uri": "",
+    "workout_name": "Unnamed Workout",
+    "workout_type": "Unknown",
+    "standard_duration": pd.NA,
+    "standard_hr": pd.NA,
+    "tempo": pd.NA,
+}
+
+COHORT_NUMERIC_COLUMNS = ["standard_duration", "standard_hr", "tempo"]
+
+
+def ensure_cohort_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Guarantee the columns used by cohort KPIs, correlations, and charts exist."""
+    normalized = df.copy()
+    for column, default_value in COHORT_DEFAULT_COLUMNS.items():
+        if column not in normalized.columns:
+            normalized[column] = default_value
+
+    for column in COHORT_NUMERIC_COLUMNS:
+        normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
+
+    for column, default_value in COHORT_DEFAULT_COLUMNS.items():
+        if column not in COHORT_NUMERIC_COLUMNS:
+            normalized[column] = normalized[column].fillna(default_value).replace("", default_value)
+
+    return normalized
+
+
 def inject_researcher_area_css() -> None:
     st.markdown(
         """
@@ -241,14 +273,16 @@ def build_cohort_dataset(participant_ids: list[str]) -> tuple[pd.DataFrame, str]
     if not matched_parts:
         return pd.DataFrame(), "No Spotify tracks were found inside Strava workout windows for the active participant blocks."
 
-    cohort_df = pd.concat(matched_parts, ignore_index=True)
+    cohort_df = ensure_cohort_columns(pd.concat(matched_parts, ignore_index=True))
     client_id, client_secret = get_configured_spotify_credentials()
-    enriched_df, bpm_status = add_track_tempos(cohort_df, client_id, client_secret)
+    try:
+        enriched_df, bpm_status = add_track_tempos(cohort_df, client_id, client_secret)
+    except KeyError as exc:
+        missing_column = str(exc.args[0]) if exc.args else "unknown"
+        enriched_df = cohort_df.copy()
+        bpm_status = f"BPM enrichment skipped because the uploaded data is missing column `{missing_column}`."
 
-    for col in ["standard_duration", "standard_hr", "tempo"]:
-        if col not in enriched_df.columns:
-            enriched_df[col] = pd.NA
-        enriched_df[col] = pd.to_numeric(enriched_df[col], errors="coerce")
+    enriched_df = ensure_cohort_columns(enriched_df)
 
     scope_status = f"Analysis scoped to current participant blocks: {', '.join(participant_ids)}."
     if skipped_participants:
